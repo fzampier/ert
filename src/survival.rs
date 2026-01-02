@@ -96,7 +96,7 @@ struct SurvivalData {
 
 struct FutilityInfo {
     event_number: usize,
-    wealth_at_trigger: f64,
+    _wealth_at_trigger: f64,
     required_hr: f64,
     ratio_to_design: f64,
 }
@@ -434,7 +434,7 @@ pub fn run() {
                 );
                 futility_info = Some(FutilityInfo {
                     event_number: i,
-                    wealth_at_trigger: w,
+                    _wealth_at_trigger: w,
                     required_hr: req_hr,
                     ratio_to_design: req_hr / target_hr,
                 });

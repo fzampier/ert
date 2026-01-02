@@ -160,7 +160,7 @@ fn required_effect_for_success<R: Rng + ?Sized>(
 
 struct FutilityInfo {
     patient_number: usize,
-    wealth_at_trigger: f64,
+    _wealth_at_trigger: f64,
     required_arr: f64,
     ratio_to_design: f64,
 }
@@ -377,7 +377,7 @@ pub fn run() {
                 );
                 futility_info = Some(FutilityInfo {
                     patient_number: i,
-                    wealth_at_trigger: proc.wealth,
+                    _wealth_at_trigger: proc.wealth,
                     required_arr: req_arr,
                     ratio_to_design: req_arr / design_arr,
                 });

@@ -135,7 +135,7 @@ enum Method {
 
 struct FutilityInfo {
     patient_number: usize,
-    wealth_at_trigger: f64,
+    _wealth_at_trigger: f64,
     required_effect: f64,
     ratio_to_design: f64,
 }
@@ -149,7 +149,7 @@ struct TrialResult {
 }
 
 struct MethodResults {
-    method: Method,
+    _method: Method,
     type1_error: f64,
     success_count: usize,
     no_stop_count: usize,
@@ -538,7 +538,7 @@ fn run_simulation<R: Rng + ?Sized>(
                     );
                     futility_info = Some(FutilityInfo {
                         patient_number: i,
-                        wealth_at_trigger: proc.wealth,
+                        _wealth_at_trigger: proc.wealth,
                         required_effect: req,
                         ratio_to_design: req / design_effect,
                     });
@@ -570,7 +570,7 @@ fn run_simulation<R: Rng + ?Sized>(
                     );
                     futility_info = Some(FutilityInfo {
                         patient_number: i,
-                        wealth_at_trigger: proc.wealth,
+                        _wealth_at_trigger: proc.wealth,
                         required_effect: req,
                         ratio_to_design: req / design_effect,
                     });
@@ -630,7 +630,7 @@ fn run_simulation<R: Rng + ?Sized>(
     } else { Vec::new() };
 
     MethodResults {
-        method,
+        _method: method,
         type1_error,
         success_count,
         no_stop_count,
@@ -797,8 +797,8 @@ fn build_method_section(
     design_effect: f64,
     n_patients: usize,
     n_sims: usize,
-    min_val: Option<f64>,
-    max_val: Option<f64>,
+    _min_val: Option<f64>,
+    _max_val: Option<f64>,
     run_futility: bool,
     futility_watch: f64,
     plot_id: usize,
@@ -894,7 +894,7 @@ fn build_method_section(
         ));
     }
 
-    let success_thresh = 20.0; // Will use actual value
+    let _success_thresh = 20.0; // Will use actual value
 
     html.push_str(&format!(r#"
         <h3>Visualizations</h3>
