@@ -5,6 +5,9 @@ use std::fs::File;
 use std::io::Write;
 use csv::ReaderBuilder;
 use serde::Deserialize;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_string,
@@ -26,6 +29,32 @@ struct CsvRowRaw {
 struct CsvRow {
     treatment: u8,
     outcome: u8,
+}
+
+/// Design assumptions for futility analysis
+#[derive(Clone)]
+struct DesignParams {
+    control_rate: f64,
+    treatment_rate: f64,
+    design_arr: f64,
+}
+
+/// A single futility checkpoint measurement
+#[derive(Clone)]
+struct FutilityPoint {
+    patient_num: usize,
+    wealth: f64,
+    required_arr: f64,
+    ratio_to_design: f64,
+}
+
+/// Futility analysis summary
+struct FutilityAnalysis {
+    design: DesignParams,
+    points: Vec<FutilityPoint>,          // All checkpoint measurements
+    regions: Vec<(usize, usize)>,        // (start, end) of futility regions
+    worst_point: Option<FutilityPoint>,  // Highest ratio point
+    ever_triggered: bool,
 }
 
 /// Result of analyzing real trial data
@@ -58,6 +87,9 @@ struct AnalysisResult {
 
     // Trajectory for plotting
     trajectory: Vec<f64>,
+
+    // Futility analysis (if enabled)
+    futility_analysis: Option<FutilityAnalysis>,
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -105,16 +137,30 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     println!("Success threshold (1/alpha, default = 20 for alpha=0.05):");
     let success_threshold = get_input("Success threshold: ");
 
-    let use_futility = get_bool("Set futility watch threshold?");
-    let futility_threshold = if use_futility {
-        Some(get_input("Futility threshold (e.g., 0.5): "))
+    // Futility configuration
+    let use_futility = get_bool("Enable futility monitoring?");
+    let (futility_threshold, design_params) = if use_futility {
+        let fut = get_input("Futility threshold (e.g., 0.5): ");
+
+        println!("\n--- Design Assumptions (for futility analysis) ---");
+        let p_ctrl = get_input("Design control event rate (e.g., 0.30): ");
+        let p_trt = get_input("Design treatment event rate (e.g., 0.20): ");
+        let design_arr = (p_ctrl - p_trt).abs();
+        println!("Design ARR: {:.1}%", design_arr * 100.0);
+
+        (Some(fut), Some(DesignParams {
+            control_rate: p_ctrl,
+            treatment_rate: p_trt,
+            design_arr,
+        }))
     } else {
-        None
+        (None, None)
     };
 
     // Run analysis
     println!("\n--- Running e-RT Analysis ---");
-    let result = analyze_data(&data, burn_in, ramp, success_threshold, futility_threshold);
+    let result = analyze_data(&data, burn_in, ramp, success_threshold,
+                               futility_threshold, design_params);
 
     // Print console results
     print_results(&result, success_threshold, futility_threshold);
@@ -136,7 +182,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 fn read_csv(path: &str) -> Result<Vec<CsvRow>, Box<dyn Error>> {
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
-        .flexible(true)  // Allow variable number of columns
+        .flexible(true)
         .from_path(path)?;
 
     let mut data = Vec::new();
@@ -145,7 +191,6 @@ fn read_csv(path: &str) -> Result<Vec<CsvRow>, Box<dyn Error>> {
     for result in reader.deserialize() {
         let row: CsvRowRaw = result?;
 
-        // Try to parse treatment and outcome, skip NA rows
         let treatment = match row.treatment.parse::<u8>() {
             Ok(v) if v <= 1 => v,
             _ => { skipped += 1; continue; }
@@ -165,25 +210,112 @@ fn read_csv(path: &str) -> Result<Vec<CsvRow>, Box<dyn Error>> {
     Ok(data)
 }
 
+/// Monte Carlo: find required ARR for 50% chance of recovery
+fn required_arr_for_recovery(
+    current_wealth: f64,
+    n_remaining: usize,
+    p_ctrl: f64,
+    burn_in: usize,
+    ramp: usize,
+    success_threshold: f64,
+    mc_sims: usize,
+) -> f64 {
+    if n_remaining == 0 {
+        return 1.0;
+    }
+
+    let mut rng = StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+    let mut low = 0.001;
+    let mut high = 0.50;
+
+    for _ in 0..8 {  // Binary search iterations
+        let mid = (low + high) / 2.0;
+        let p_trt = (p_ctrl - mid).max(0.001);
+
+        let mut successes = 0;
+        for _ in 0..mc_sims {
+            let mut wealth = current_wealth;
+            let mut n_trt = 0.0;
+            let mut events_trt = 0.0;
+            let mut n_ctrl = 0.0;
+            let mut events_ctrl = 0.0;
+
+            for j in 1..=n_remaining {
+                let is_trt = rng.gen_bool(0.5);
+                let prob = if is_trt { p_trt } else { p_ctrl };
+                let outcome = if rng.gen_bool(prob) { 1.0 } else { 0.0 };
+
+                let rate_trt = if n_trt > 0.0 { events_trt / n_trt } else { 0.5 };
+                let rate_ctrl = if n_ctrl > 0.0 { events_ctrl / n_ctrl } else { 0.5 };
+                let delta_hat = rate_trt - rate_ctrl;
+
+                if is_trt {
+                    n_trt += 1.0;
+                    if outcome == 1.0 { events_trt += 1.0; }
+                } else {
+                    n_ctrl += 1.0;
+                    if outcome == 1.0 { events_ctrl += 1.0; }
+                }
+
+                if j > burn_in {
+                    let num = ((j - burn_in) as f64).max(0.0);
+                    let c_i = (num / ramp as f64).clamp(0.0, 1.0);
+
+                    let lambda = if outcome == 1.0 {
+                        0.5 + 0.5 * c_i * delta_hat
+                    } else {
+                        0.5 - 0.5 * c_i * delta_hat
+                    };
+                    let lambda = lambda.clamp(0.001, 0.999);
+                    let multiplier = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
+                    wealth *= multiplier;
+                }
+
+                if wealth >= success_threshold {
+                    successes += 1;
+                    break;
+                }
+            }
+        }
+
+        let success_rate = successes as f64 / mc_sims as f64;
+        if success_rate < 0.5 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    (low + high) / 2.0
+}
+
 fn analyze_data(
     data: &[CsvRow],
     burn_in: usize,
     ramp: usize,
     success_threshold: f64,
-    _futility_threshold: Option<f64>,
+    futility_threshold: Option<f64>,
+    design_params: Option<DesignParams>,
 ) -> AnalysisResult {
     let n_total = data.len();
     let mut proc = BinaryERTProcess::new(burn_in, ramp);
 
     let mut trajectory = Vec::with_capacity(n_total + 1);
-    trajectory.push(1.0); // Initial wealth
+    trajectory.push(1.0);
 
     let mut crossed = false;
     let mut crossed_at: Option<usize> = None;
     let mut risk_diff_at_cross: Option<f64> = None;
     let mut or_at_cross: Option<(f64, f64, f64)> = None;
 
-    // Process each patient in enrollment order
+    // Futility tracking
+    let checkpoint_interval = (n_total as f64 * 0.02).ceil() as usize; // 2% intervals
+    let mut futility_points: Vec<FutilityPoint> = Vec::new();
+    let mut futility_regions: Vec<(usize, usize)> = Vec::new();
+    let mut in_futility = false;
+    let mut futility_start: usize = 0;
+
+    // Process each patient
     for (i, row) in data.iter().enumerate() {
         let patient_num = i + 1;
         let is_trt = row.treatment == 1;
@@ -192,13 +324,53 @@ fn analyze_data(
         proc.update(patient_num, outcome, is_trt);
         trajectory.push(proc.wealth);
 
-        // Check for crossing
+        // Check for success crossing
         if !crossed && proc.wealth >= success_threshold {
             crossed = true;
             crossed_at = Some(patient_num);
             risk_diff_at_cross = Some(proc.current_risk_diff());
             or_at_cross = Some(proc.current_odds_ratio());
         }
+
+        // Futility tracking (if enabled)
+        if let (Some(fut_thresh), Some(ref design)) = (futility_threshold, &design_params) {
+            let below_futility = proc.wealth < fut_thresh;
+
+            // Track futility regions
+            if below_futility && !in_futility {
+                in_futility = true;
+                futility_start = patient_num;
+            } else if !below_futility && in_futility {
+                in_futility = false;
+                futility_regions.push((futility_start, patient_num - 1));
+            }
+
+            // Calculate required effect at checkpoints when below futility
+            if below_futility && patient_num % checkpoint_interval == 0 && patient_num > burn_in {
+                let n_remaining = n_total - patient_num;
+                let required_arr = required_arr_for_recovery(
+                    proc.wealth,
+                    n_remaining,
+                    design.control_rate,
+                    burn_in,
+                    ramp,
+                    success_threshold,
+                    100,  // MC simulations
+                );
+
+                futility_points.push(FutilityPoint {
+                    patient_num,
+                    wealth: proc.wealth,
+                    required_arr,
+                    ratio_to_design: required_arr / design.design_arr,
+                });
+            }
+        }
+    }
+
+    // Close final futility region if still in one
+    if in_futility {
+        futility_regions.push((futility_start, n_total));
     }
 
     // Final statistics
@@ -207,15 +379,29 @@ fn analyze_data(
     let (rate_trt, rate_ctrl) = proc.get_rates();
     let (n_trt, n_ctrl) = proc.get_ns();
 
-    // Type M error (if crossed)
     let type_m = if crossed {
         let rd_cross = risk_diff_at_cross.unwrap().abs();
         let rd_final = final_risk_diff.abs();
-        if rd_final > 0.0 {
-            Some(rd_cross / rd_final)
-        } else {
-            None
-        }
+        if rd_final > 0.0 { Some(rd_cross / rd_final) } else { None }
+    } else {
+        None
+    };
+
+    // Build futility analysis
+    let futility_analysis = if let Some(design) = design_params {
+        let worst_point = futility_points.iter()
+            .max_by(|a, b| a.ratio_to_design.partial_cmp(&b.ratio_to_design).unwrap())
+            .cloned();
+
+        let ever_triggered = !futility_regions.is_empty();
+
+        Some(FutilityAnalysis {
+            design,
+            points: futility_points,
+            regions: futility_regions,
+            worst_point,
+            ever_triggered,
+        })
     } else {
         None
     };
@@ -235,6 +421,7 @@ fn analyze_data(
         type_m,
         final_evalue: proc.wealth,
         trajectory,
+        futility_analysis,
     }
 }
 
@@ -281,10 +468,33 @@ fn print_results(result: &AnalysisResult, success_threshold: f64, futility_thres
         println!("  |RD at cross| / |RD final|: {:.2}x", type_m);
     }
 
-    // Event rates by arm
+    // Event rates
     println!("\n--- Event Rates ---");
     println!("  Treatment:        {:.1}% ({} patients)", result.rate_trt * 100.0, result.n_trt);
     println!("  Control:          {:.1}% ({} patients)", result.rate_ctrl * 100.0, result.n_ctrl);
+
+    // Futility analysis
+    if let Some(ref fut_analysis) = result.futility_analysis {
+        println!("\n--- Futility Analysis ---");
+        println!("  Design ARR:       {:.1}%", fut_analysis.design.design_arr * 100.0);
+
+        if fut_analysis.ever_triggered {
+            println!("  Episodes:         {} time(s) below threshold", fut_analysis.regions.len());
+            for (i, (start, end)) in fut_analysis.regions.iter().enumerate() {
+                println!("    Episode {}: patients {} - {}", i + 1, start, end);
+            }
+
+            if let Some(ref worst) = fut_analysis.worst_point {
+                println!("  Worst point:");
+                println!("    Patient:        {}", worst.patient_num);
+                println!("    Wealth:         {:.4}", worst.wealth);
+                println!("    Required ARR:   {:.1}%", worst.required_arr * 100.0);
+                println!("    Ratio to design: {:.2}x", worst.ratio_to_design);
+            }
+        } else {
+            println!("  Status:           Never dropped below futility threshold");
+        }
+    }
 }
 
 fn build_html_report(
@@ -297,7 +507,6 @@ fn build_html_report(
 ) -> String {
     let timestamp = chrono_lite();
 
-    // Prepare trajectory data for plotting
     let x_axis: Vec<usize> = (0..=result.n_total).collect();
     let x_json = format!("{:?}", x_axis);
     let y_json = format!("{:?}", result.trajectory);
@@ -315,7 +524,6 @@ fn build_html_report(
         "<span style='color:gray'>Did not cross (ongoing)</span>".to_string()
     };
 
-    // Effect at crossing section
     let crossing_section = if result.crossed {
         let (or, or_lo, or_hi) = result.or_at_cross.unwrap();
         format!(r#"
@@ -332,7 +540,6 @@ fn build_html_report(
         String::new()
     };
 
-    // Type M section
     let type_m_section = if let Some(type_m) = result.type_m {
         format!(r#"
         <h3>Type M Error (Magnification)</h3>
@@ -344,8 +551,118 @@ fn build_html_report(
         String::new()
     };
 
+    // Futility lines for plots
     let futility_line = if let Some(fut) = futility_threshold {
         format!("{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',width:1.5,dash:'dot'}}}}", fut, fut)
+    } else {
+        String::new()
+    };
+
+    let futility_line_support = if let Some(fut) = futility_threshold {
+        format!("{{type:'line',x0:0,x1:1,xref:'paper',y0:{:.4},y1:{:.4},line:{{color:'orange',width:1.5,dash:'dot'}}}}", fut.ln(), fut.ln())
+    } else {
+        String::new()
+    };
+
+    // Futility shading regions for plots
+    let mut futility_shapes = String::new();
+    let mut futility_shapes_support = String::new();
+
+    if let Some(ref fut_analysis) = result.futility_analysis {
+        for (start, end) in &fut_analysis.regions {
+            // For e-value plot (log scale)
+            futility_shapes.push_str(&format!(
+                "{{type:'rect',x0:{},x1:{},y0:0,y1:1,yref:'paper',fillcolor:'rgba(255,165,0,0.15)',line:{{width:0}}}},",
+                start, end
+            ));
+            // For support plot
+            futility_shapes_support.push_str(&format!(
+                "{{type:'rect',x0:{},x1:{},y0:0,y1:1,yref:'paper',fillcolor:'rgba(255,165,0,0.15)',line:{{width:0}}}},",
+                start, end
+            ));
+        }
+    }
+
+    // Futility analysis section for HTML
+    let futility_section = if let Some(ref fut_analysis) = result.futility_analysis {
+        let mut html = format!(r#"
+        <h2>Futility Analysis</h2>
+        <p><em>Note: Futility monitoring is decision support, not anytime-valid inference.</em></p>
+        <table>
+            <tr><td>Design Control Rate:</td><td>{:.1}%</td></tr>
+            <tr><td>Design Treatment Rate:</td><td>{:.1}%</td></tr>
+            <tr><td>Design ARR:</td><td><strong>{:.1}%</strong></td></tr>
+            <tr><td>Ever Below Threshold:</td><td>{}</td></tr>
+        </table>
+        "#,
+        fut_analysis.design.control_rate * 100.0,
+        fut_analysis.design.treatment_rate * 100.0,
+        fut_analysis.design.design_arr * 100.0,
+        if fut_analysis.ever_triggered { "Yes" } else { "No" }
+        );
+
+        if fut_analysis.ever_triggered {
+            html.push_str("<h3>Futility Episodes</h3><table>");
+            for (i, (start, end)) in fut_analysis.regions.iter().enumerate() {
+                html.push_str(&format!(
+                    "<tr><td>Episode {}:</td><td>Patients {} - {}</td></tr>",
+                    i + 1, start, end
+                ));
+            }
+            html.push_str("</table>");
+
+            if let Some(ref worst) = fut_analysis.worst_point {
+                html.push_str(&format!(r#"
+                <h3>Worst Point</h3>
+                <table>
+                    <tr><td>Patient:</td><td>{}</td></tr>
+                    <tr><td>Wealth:</td><td>{:.4}</td></tr>
+                    <tr><td>Required ARR for recovery:</td><td><strong>{:.1}%</strong></td></tr>
+                    <tr><td>Ratio to design ARR:</td><td><strong>{:.2}x</strong></td></tr>
+                </table>
+                "#,
+                worst.patient_num, worst.wealth, worst.required_arr * 100.0, worst.ratio_to_design
+                ));
+            }
+        }
+
+        // Add ratio plot if we have data points
+        if !fut_analysis.points.is_empty() {
+            let ratio_x: Vec<usize> = fut_analysis.points.iter().map(|p| p.patient_num).collect();
+            let ratio_y: Vec<f64> = fut_analysis.points.iter().map(|p| p.ratio_to_design).collect();
+            let ratio_x_json = format!("{:?}", ratio_x);
+            let ratio_y_json = format!("{:?}", ratio_y);
+
+            html.push_str(&format!(r#"
+            <h3>Required Effect Ratio Over Time</h3>
+            <p>Shows ratio of required ARR to design ARR when below futility threshold. Higher = harder to recover.</p>
+            <div id="plot3" style="width:100%;height:350px;"></div>
+            <script>
+                Plotly.newPlot('plot3', [
+                    {{
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        x: {},
+                        y: {},
+                        line: {{color: 'darkorange', width: 2}},
+                        marker: {{size: 6}},
+                        name: 'Required/Design Ratio'
+                    }}
+                ], {{
+                    yaxis: {{title: 'Required ARR / Design ARR', rangemode: 'tozero'}},
+                    xaxis: {{title: 'Patient Number'}},
+                    shapes: [
+                        {{type:'line',x0:0,x1:1,xref:'paper',y0:1,y1:1,line:{{color:'gray',width:1.5,dash:'dash'}}}}
+                    ],
+                    annotations: [
+                        {{x:1,xref:'paper',y:1,text:'Design (1.0x)',showarrow:false,font:{{color:'gray'}}}}
+                    ]
+                }});
+            </script>
+            "#, ratio_x_json, ratio_y_json));
+        }
+
+        html
     } else {
         String::new()
     };
@@ -370,6 +687,7 @@ fn build_html_report(
         td:first-child {{ color: #7f8c8d; }}
         .highlight {{ background: #e8f4f8; font-weight: bold; }}
         .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
+        em {{ color: #95a5a6; }}
     </style>
 </head>
 <body>
@@ -409,11 +727,17 @@ fn build_html_report(
 
         {}
 
+        {}
+
         <h2>e-Value Trajectory</h2>
-        <div id="plot1" style="width:100%;height:500px;"></div>
+        <div id="plot1" style="width:100%;height:400px;"></div>
+
+        <h2>Support (ln e-value)</h2>
+        <div id="plot2" style="width:100%;height:400px;"></div>
     </div>
 
     <script>
+        // e-value trajectory (log scale)
         Plotly.newPlot('plot1', [
             {{
                 type: 'scatter',
@@ -427,11 +751,36 @@ fn build_html_report(
             yaxis: {{type: 'log', title: 'e-value'}},
             xaxis: {{title: 'Patients Enrolled'}},
             shapes: [
+                {}
                 {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}},
                 {}
             ],
             annotations: [
-                {{x:1,xref:'paper',y:{},text:'Success',showarrow:false,font:{{color:'green'}}}}
+                {{x:1,xref:'paper',y:{},text:'Success (e={:.0})',showarrow:false,font:{{color:'green'}}}}
+            ]
+        }});
+
+        // Support trajectory (linear scale, ln of e-value)
+        var support = {}.map(function(e) {{ return Math.log(e); }});
+        Plotly.newPlot('plot2', [
+            {{
+                type: 'scatter',
+                mode: 'lines',
+                x: {},
+                y: support,
+                line: {{color: 'blue', width: 2}},
+                name: 'Support'
+            }}
+        ], {{
+            yaxis: {{title: 'Support (ln e-value)'}},
+            xaxis: {{title: 'Patients Enrolled'}},
+            shapes: [
+                {}
+                {{type:'line',x0:0,x1:1,xref:'paper',y0:{:.4},y1:{:.4},line:{{color:'green',width:2,dash:'dash'}}}},
+                {}
+            ],
+            annotations: [
+                {{x:1,xref:'paper',y:{:.4},text:'Success (ln {:.0} = {:.2})',showarrow:false,font:{{color:'green'}}}}
             ]
         }});
     </script>
@@ -457,10 +806,20 @@ fn build_html_report(
         final_or, final_or_lo, final_or_hi,
         // Type M section
         type_m_section,
-        // Plot data
+        // Futility section
+        futility_section,
+        // Plot 1: e-value (log scale)
         x_json, y_json,
+        futility_shapes,
         success_threshold, success_threshold,
         futility_line,
-        success_threshold
+        success_threshold, success_threshold,
+        // Plot 2: Support (ln scale)
+        y_json,
+        x_json,
+        futility_shapes_support,
+        success_threshold.ln(), success_threshold.ln(),
+        futility_line_support,
+        success_threshold.ln(), success_threshold, success_threshold.ln()
     )
 }
