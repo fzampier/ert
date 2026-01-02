@@ -124,17 +124,6 @@ pub fn mad(data: &[f64]) -> f64 {
     median(&deviations)
 }
 
-/// Calculate percentile (0-100)
-pub fn percentile(data: &[f64], p: f64) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
 /// Simple timestamp without external crate
 pub fn chrono_lite() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -314,27 +303,3 @@ pub fn calculate_n_continuous(cohen_d: f64, power: f64) -> usize {
     2 * n_per_arm
 }
 
-// ============================================================================
-// RESULT STRUCTS
-// ============================================================================
-
-/// Information captured at futility trigger
-#[derive(Clone)]
-pub struct FutilityInfo {
-    pub patient_number: usize,
-    pub wealth_at_trigger: f64,
-    pub required_effect: f64,
-    pub ratio_to_design: f64,
-}
-
-/// Result of a single trial (simulation or real)
-#[derive(Clone)]
-pub struct BinaryTrialResult {
-    pub stopped_at: Option<usize>,
-    pub success: bool,
-    pub risk_diff_at_stop: Option<f64>,
-    pub odds_ratio_at_stop: Option<(f64, f64, f64)>, // (OR, lower, upper)
-    pub final_risk_diff: f64,
-    pub final_odds_ratio: (f64, f64, f64),
-    pub futility_info: Option<FutilityInfo>,
-}
