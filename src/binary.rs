@@ -1,84 +1,14 @@
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::RngCore;
 use std::io::{self, Write};
 use std::fs::File;
 
-// --- Helper: Input Number ---
-fn get_input(prompt: &str) -> f64 {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<f64>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-// --- Helper: Input Integer ---
-fn get_input_usize(prompt: &str) -> usize {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<usize>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-// --- Helper: Input Yes/No ---
-fn get_bool(prompt: &str) -> bool {
-    loop {
-        print!("{} (y/n): ", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer).unwrap();
-        match buffer.trim().to_lowercase().as_str() {
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            _ => println!("Please type 'y' or 'n'."),
-        }
-    }
-}
-
-// --- Helper: Optional Input ---
-fn get_optional_input(prompt: &str) -> Option<u64> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).unwrap();
-    let trimmed = buffer.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        trimmed.parse::<u64>().ok()
-    }
-}
-
-// --- Sample Size Calculator (Binary) ---
-fn calculate_n_binary(p_ctrl: f64, p_trt: f64, power: f64) -> usize {
-    let z_alpha: f64 = 1.96;
-    let z_beta: f64 = if power > 0.85 { 1.28 } else { 0.84 }; 
-    
-    let p_bar = (p_ctrl + p_trt) / 2.0;
-    let delta = (p_ctrl - p_trt).abs();
-
-    let term1 = 4.0 * (z_alpha + z_beta).powi(2);
-    let term2 = p_bar * (1.0 - p_bar);
-    let term3 = delta.powi(2);
-
-    ((term1 * term2) / term3).ceil() as usize
-}
+use crate::ert_core::{
+    get_input, get_input_usize, get_bool, get_optional_input,
+    calculate_n_binary, chrono_lite, BinaryERTProcess,
+};
 
 // --- Monte Carlo: Required Effect Size for Recovery ---
 fn required_effect_for_success<R: Rng + ?Sized>(
@@ -93,14 +23,14 @@ fn required_effect_for_success<R: Rng + ?Sized>(
     if n_remaining == 0 {
         return 1.0;
     }
-    
+
     let mut low = 0.001;
     let mut high = 0.50;
-    
+
     for _ in 0..6 {
         let mid = (low + high) / 2.0;
         let p_trt = (p_ctrl - mid).max(0.001);
-        
+
         let mut successes = 0;
         for _ in 0..mc_sims {
             let mut wealth = current_wealth;
@@ -108,28 +38,28 @@ fn required_effect_for_success<R: Rng + ?Sized>(
             let mut events_trt = 0.0;
             let mut n_ctrl = 0.0;
             let mut events_ctrl = 0.0;
-            
+
             for j in 1..=n_remaining {
                 let is_trt = rng.gen_bool(0.5);
                 let prob = if is_trt { p_trt } else { p_ctrl };
                 let outcome = if rng.gen_bool(prob) { 1.0 } else { 0.0 };
-                
+
                 let rate_trt = if n_trt > 0.0 { events_trt / n_trt } else { 0.5 };
                 let rate_ctrl = if n_ctrl > 0.0 { events_ctrl / n_ctrl } else { 0.5 };
                 let delta_hat = rate_trt - rate_ctrl;
-                
-                if is_trt { 
-                    n_trt += 1.0; 
+
+                if is_trt {
+                    n_trt += 1.0;
                     if outcome == 1.0 { events_trt += 1.0; }
-                } else { 
-                    n_ctrl += 1.0; 
+                } else {
+                    n_ctrl += 1.0;
                     if outcome == 1.0 { events_ctrl += 1.0; }
                 }
-                
+
                 if j > burn_in {
                     let num = ((j - burn_in) as f64).max(0.0);
                     let c_i = (num / ramp as f64).clamp(0.0, 1.0);
-                    
+
                     let lambda = if outcome == 1.0 {
                         0.5 + 0.5 * c_i * delta_hat
                     } else {
@@ -139,14 +69,14 @@ fn required_effect_for_success<R: Rng + ?Sized>(
                     let multiplier = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
                     wealth *= multiplier;
                 }
-                
-                if wealth >= 20.0 { 
+
+                if wealth >= 20.0 {
                     successes += 1;
-                    break; 
+                    break;
                 }
             }
         }
-        
+
         let success_rate = successes as f64 / mc_sims as f64;
         if success_rate < 0.5 {
             low = mid;
@@ -154,7 +84,7 @@ fn required_effect_for_success<R: Rng + ?Sized>(
             high = mid;
         }
     }
-    
+
     (low + high) / 2.0
 }
 
@@ -173,70 +103,11 @@ struct TrialResult {
     futility_info: Option<FutilityInfo>,
 }
 
-struct ERTProcess {
-    wealth: f64,
-    burn_in: usize,
-    ramp: usize,
-    n_trt: f64, 
-    events_trt: f64,
-    n_ctrl: f64, 
-    events_ctrl: f64,
-}
-
-impl ERTProcess {
-    fn new(burn_in: usize, ramp: usize) -> Self {
-        ERTProcess { 
-            wealth: 1.0, 
-            burn_in, 
-            ramp, 
-            n_trt: 0.0, 
-            events_trt: 0.0, 
-            n_ctrl: 0.0, 
-            events_ctrl: 0.0 
-        }
-    }
-
-    fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
-        let rate_trt = if self.n_trt > 0.0 { self.events_trt / self.n_trt } else { 0.5 };
-        let rate_ctrl = if self.n_ctrl > 0.0 { self.events_ctrl / self.n_ctrl } else { 0.5 };
-        let delta_hat = rate_trt - rate_ctrl;
-
-        if is_trt { 
-            self.n_trt += 1.0; 
-            if outcome == 1.0 { self.events_trt += 1.0; } 
-        } else { 
-            self.n_ctrl += 1.0; 
-            if outcome == 1.0 { self.events_ctrl += 1.0; } 
-        }
-
-        if i > self.burn_in {
-            let num = ((i - self.burn_in) as f64).max(0.0);
-            let c_i = (num / self.ramp as f64).clamp(0.0, 1.0);
-
-            let lambda = if outcome == 1.0 { 
-                0.5 + 0.5 * c_i * delta_hat 
-            } else { 
-                0.5 - 0.5 * c_i * delta_hat 
-            };
-            
-            let lambda = lambda.clamp(0.001, 0.999);
-            let multiplier = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            self.wealth *= multiplier;
-        }
-    }
-
-    fn current_risk_diff(&self) -> f64 {
-        let r_t = if self.n_trt > 0.0 { self.events_trt / self.n_trt } else { 0.0 };
-        let r_c = if self.n_ctrl > 0.0 { self.events_ctrl / self.n_ctrl } else { 0.0 };
-        r_t - r_c
-    }
-}
-
 pub fn run() {
     println!("\n==========================================");
     println!("   BINARY e-RT SIMULATION");
     println!("==========================================\n");
-    
+
     // --- User Inputs ---
     let p_ctrl = get_input("Control Event Rate (e.g. 0.40): ");
     let p_trt  = get_input("Treatment Event Rate (e.g. 0.30): ");
@@ -251,7 +122,7 @@ pub fn run() {
         }
         let freq_n = calculate_n_binary(p_ctrl, p_trt, power);
         println!("\nFrequentist N (Power {:.0}%): {}", power * 100.0, freq_n);
-        
+
         if get_bool("Add buffer? (10-20% increase may improve e-process power)") {
             let buffer_pct = get_input("Buffer percentage (e.g. 15): ");
             let buffered = (freq_n as f64 * (1.0 + buffer_pct / 100.0)).ceil() as usize;
@@ -263,28 +134,28 @@ pub fn run() {
     } else {
         get_input_usize("Enter Number of Patients: ")
     };
-    
+
     // Simulation parameters
     let n_sims = get_input_usize("Number of simulations (e.g. 2000): ");
-    
+
     // Success threshold
     println!("\nSuccess threshold (1/alpha). Default = 20 (alpha=0.05)");
     let success_threshold = get_input("Success threshold (e.g. 20): ");
-    
+
     // Futility watch
     println!("\nFutility watch threshold. Default = 0.5");
     let futility_watch = get_input("Futility watch threshold (e.g. 0.5): ");
-    
+
     // Futility analysis
     let run_futility = get_bool("Run futility analysis? (adds computation time)");
-    
+
     // Seed
     let seed = get_optional_input("Seed for reproducibility (press Enter for random): ");
-    
+
     // Fixed parameters (vanilla e-RT)
     let burn_in: usize = 50;
     let ramp: usize = 100;
-    
+
     println!("\n--- Trial Design ---");
     println!("Control Rate:    {:.1}%", p_ctrl * 100.0);
     println!("Treatment Rate:  {:.1}%", p_trt * 100.0);
@@ -311,16 +182,16 @@ pub fn run() {
     print!("\nPhase 1: Type I Error (Null)... ");
     io::stdout().flush().unwrap();
     let mut null_rejections = 0;
-    
+
     for _ in 0..n_sims {
-        let mut proc = ERTProcess::new(burn_in, ramp);
+        let mut proc = BinaryERTProcess::new(burn_in, ramp);
         for i in 1..=n_patients {
             let is_trt = rng.gen_bool(0.5);
             let outcome = if rng.gen_bool(p_ctrl) { 1.0 } else { 0.0 };
             proc.update(i, outcome, is_trt);
             if proc.wealth > success_threshold {
                 null_rejections += 1;
-                break; 
+                break;
             }
         }
     }
@@ -332,13 +203,13 @@ pub fn run() {
     if run_futility { print!(" + Futility"); }
     println!("...");
     io::stdout().flush().unwrap();
-    
+
     let mut results: Vec<TrialResult> = Vec::with_capacity(n_sims);
     let mut trajectories: Vec<Vec<f64>> = vec![vec![0.0; n_patients + 1]; n_sims];
-    
+
     // Store 30 sample trajectories for plotting
     let sample_indices: Vec<usize> = (0..30.min(n_sims)).collect();
-    
+
     let pb_interval = (n_sims / 20).max(1);
 
     for sim in 0..n_sims {
@@ -346,8 +217,8 @@ pub fn run() {
             print!(".");
             io::stdout().flush().unwrap();
         }
-        
-        let mut proc = ERTProcess::new(burn_in, ramp);
+
+        let mut proc = BinaryERTProcess::new(burn_in, ramp);
         let mut stopped = false;
         let mut stop_step = None;
         let mut stop_diff = None;
@@ -359,7 +230,7 @@ pub fn run() {
             let is_trt = rng.gen_bool(0.5);
             let prob = if is_trt { p_trt } else { p_ctrl };
             let outcome = if rng.gen_bool(prob) { 1.0 } else { 0.0 };
-            
+
             proc.update(i, outcome, is_trt);
             trajectories[sim][i] = proc.wealth;
 
@@ -368,11 +239,11 @@ pub fn run() {
                 let n_remaining = n_patients - i;
                 let req_arr = required_effect_for_success(
                     &mut *rng,
-                    proc.wealth, 
-                    n_remaining, 
-                    p_ctrl, 
-                    burn_in, 
-                    ramp, 
+                    proc.wealth,
+                    n_remaining,
+                    p_ctrl,
+                    burn_in,
+                    ramp,
                     50
                 );
                 futility_info = Some(FutilityInfo {
@@ -404,7 +275,7 @@ pub fn run() {
     // === COMPUTE STATISTICS ===
     let success_count = results.iter().filter(|r| r.success).count();
     let no_stop_count = n_sims - success_count;
-    
+
     let (avg_stop_n, avg_diff_stop, avg_diff_final, type_m_error) = if success_count > 0 {
         let successes: Vec<&TrialResult> = results.iter().filter(|r| r.success).collect();
         let avg_n: f64 = successes.iter()
@@ -422,24 +293,24 @@ pub fn run() {
     let futility_stats = if run_futility {
         let trials_with_info: Vec<&TrialResult> = results.iter()
             .filter(|r| r.futility_info.is_some()).collect();
-        
+
         if !trials_with_info.is_empty() {
             let n_triggered = trials_with_info.len();
-            
+
             let mut trigger_patients: Vec<f64> = trials_with_info.iter()
                 .map(|r| r.futility_info.as_ref().unwrap().patient_number as f64).collect();
             trigger_patients.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            
+
             let mut required_arrs: Vec<f64> = trials_with_info.iter()
                 .map(|r| r.futility_info.as_ref().unwrap().required_arr).collect();
             required_arrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            
+
             let mut ratios: Vec<f64> = trials_with_info.iter()
                 .map(|r| r.futility_info.as_ref().unwrap().ratio_to_design).collect();
             ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            
+
             let triggered_success = trials_with_info.iter().filter(|r| r.success).count();
-            
+
             Some((
                 n_triggered,
                 trigger_patients[n_triggered / 2],
@@ -469,7 +340,7 @@ pub fn run() {
 
     // === GENERATE HTML REPORT ===
     println!("\nGenerating report...");
-    
+
     // Prepare trajectory data for plots
     let mut x_axis: Vec<usize> = Vec::new();
     let mut y_median: Vec<f64> = Vec::new();
@@ -481,7 +352,7 @@ pub fn run() {
         x_axis.push(i);
         let mut step_vals: Vec<f64> = trajectories.iter().map(|v| v[i]).collect();
         step_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         y_lower.push(step_vals[(n_sims as f64 * 0.025) as usize]);
         y_median.push(step_vals[(n_sims as f64 * 0.50) as usize]);
         y_upper.push(step_vals[(n_sims as f64 * 0.975) as usize]);
@@ -522,7 +393,7 @@ pub fn run() {
 
     let mut file = File::create("binary_report.html").unwrap();
     file.write_all(html.as_bytes()).unwrap();
-    
+
     println!("\n>> Report saved: binary_report.html");
     println!("==========================================");
 }
@@ -580,7 +451,7 @@ fn build_html_report(
                 <tr><td>Ratio (Required/Design) - 75th pctl:</td><td>{:.2}x</td></tr>
                 <tr><td>Triggered trials that succeeded:</td><td>{} ({:.1}%)</td></tr>
             </table>
-            "#, 
+            "#,
             futility_watch, n_trig, (n_trig as f64 / n_sims as f64) * 100.0,
             med_patient, (med_patient / n_patients as f64) * 100.0,
             med_arr * 100.0, design_arr * 100.0,
@@ -633,7 +504,7 @@ fn build_html_report(
     <title>Binary e-RT Simulation Report</title>
     <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
         .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
         h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
@@ -650,7 +521,7 @@ fn build_html_report(
     <div class="container">
         <h1>Binary e-RT Simulation Report</h1>
         <p class="timestamp">Generated: {}</p>
-        
+
         <h2>Parameters</h2>
         <table>
             <tr><td>Control Event Rate:</td><td>{:.1}%</td></tr>
@@ -684,16 +555,16 @@ fn build_html_report(
         {}
 
         <h2>Visualizations</h2>
-        
+
         <h3>e-Value Trajectories (Median with 95% CI)</h3>
         <div id="plot1" style="width:100%;height:500px;"></div>
-        
+
         <h3>Sample Trajectories (30 runs)</h3>
         <div id="plot2" style="width:100%;height:500px;"></div>
-        
+
         <h3>Stopping Times Distribution</h3>
         <div id="plot3" style="width:100%;height:400px;"></div>
-        
+
         {}
     </div>
 
@@ -761,21 +632,3 @@ fn build_html_report(
         stop_times_json
     )
 }
-
-// Simple timestamp without external crate
-fn chrono_lite() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    // Very rough conversion - good enough for display
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
-}
-
-use rand::RngCore;

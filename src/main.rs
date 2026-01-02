@@ -1,7 +1,10 @@
+mod ert_core;
 mod binary;
 mod continuous;
 mod survival;
 mod multistate;
+mod analyze_binary;
+mod analyze_continuous;
 
 fn main() {
     println!("\n==========================================");
@@ -15,20 +18,28 @@ fn main() {
     println!("  5. Analyze Binary Trial (CSV)");
     println!("  6. Analyze Continuous Trial (CSV)");
     println!("  7. Exit");
-    
+
     print!("\nSelect: ");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
-    
+
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
-    
+
     match input.trim() {
         "1" => binary::run(),
         "2" => continuous::run(),
         "3" => survival::run(),
         "4" => multistate::run(),
-        "5" => println!("Not yet implemented"),
-        "6" => println!("Not yet implemented"),
+        "5" => {
+            if let Err(e) = analyze_binary::run() {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "6" => {
+            if let Err(e) = analyze_continuous::run() {
+                eprintln!("Error: {}", e);
+            }
+        }
         "7" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }

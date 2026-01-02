@@ -5,125 +5,10 @@ use rand::RngCore;
 use std::io::{self, Write};
 use std::fs::File;
 
-// === HELPERS ===
-
-fn get_input(prompt: &str) -> f64 {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<f64>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_input_usize(prompt: &str) -> usize {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<usize>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_bool(prompt: &str) -> bool {
-    loop {
-        print!("{} (y/n): ", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer).unwrap();
-        match buffer.trim().to_lowercase().as_str() {
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            _ => println!("Please type 'y' or 'n'."),
-        }
-    }
-}
-
-fn get_optional_input(prompt: &str) -> Option<u64> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).unwrap();
-    let trimmed = buffer.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        trimmed.parse::<u64>().ok()
-    }
-}
-
-fn get_choice(prompt: &str, options: &[&str]) -> usize {
-    loop {
-        println!("{}", prompt);
-        for (i, opt) in options.iter().enumerate() {
-            println!("  {}. {}", i + 1, opt);
-        }
-        print!("Select: ");
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        if io::stdin().read_line(&mut buffer).is_ok() {
-            if let Ok(num) = buffer.trim().parse::<usize>() {
-                if num >= 1 && num <= options.len() {
-                    return num;
-                }
-            }
-        }
-        println!("Invalid choice.");
-    }
-}
-
-fn median(data: &[f64]) -> f64 {
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = sorted.len();
-    if n == 0 {
-        return 0.0;
-    }
-    if n % 2 == 0 {
-        (sorted[n/2 - 1] + sorted[n/2]) / 2.0
-    } else {
-        sorted[n/2]
-    }
-}
-
-fn mad(data: &[f64]) -> f64 {
-    let med = median(data);
-    let deviations: Vec<f64> = data.iter().map(|x| (x - med).abs()).collect();
-    median(&deviations)
-}
-
-fn calculate_n_continuous(cohen_d: f64, power: f64) -> usize {
-    let z_alpha: f64 = 1.96;
-    let z_beta: f64 = if power > 0.85 { 1.28 } else { 0.84 };
-    let n_per_arm = (2.0 * ((z_alpha + z_beta) / cohen_d).powi(2)).ceil() as usize;
-    2 * n_per_arm
-}
-
-fn chrono_lite() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
-}
+use crate::ert_core::{
+    get_input, get_input_usize, get_bool, get_optional_input, get_choice,
+    median, mad, calculate_n_continuous, chrono_lite,
+};
 
 // === STRUCTS ===
 
@@ -259,15 +144,15 @@ impl MADProcess {
 
     fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
         // Get direction from past data
-        let direction = if self.outcomes.len() > 0 {
+        let direction = if !self.outcomes.is_empty() {
             let trt_vals: Vec<f64> = self.outcomes.iter().zip(self.treatments.iter())
                 .filter(|(_, &t)| t).map(|(&o, _)| o).collect();
             let ctrl_vals: Vec<f64> = self.outcomes.iter().zip(self.treatments.iter())
                 .filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-            
-            let mean_trt = if trt_vals.len() > 0 { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
-            let mean_ctrl = if ctrl_vals.len() > 0 { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
-            
+
+            let mean_trt = if !trt_vals.is_empty() { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
+            let mean_ctrl = if !ctrl_vals.is_empty() { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
+
             if mean_trt > mean_ctrl { 1.0 } else if mean_trt < mean_ctrl { -1.0 } else { 0.0 }
         } else {
             0.0
@@ -280,7 +165,7 @@ impl MADProcess {
         // Bet only after burn-in with enough data
         if i > self.burn_in && self.outcomes.len() > 1 {
             let past_outcomes: Vec<f64> = self.outcomes[..self.outcomes.len()-1].to_vec();
-            
+
             let med = median(&past_outcomes);
             let mad_val = mad(&past_outcomes);
             let s = if mad_val > 0.0 { mad_val } else { 1.0 };
@@ -303,10 +188,10 @@ impl MADProcess {
             .filter(|(_, &t)| t).map(|(&o, _)| o).collect();
         let ctrl_vals: Vec<f64> = self.outcomes.iter().zip(self.treatments.iter())
             .filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-        
-        let mean_trt = if trt_vals.len() > 0 { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
-        let mean_ctrl = if ctrl_vals.len() > 0 { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
-        
+
+        let mean_trt = if !trt_vals.is_empty() { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
+        let mean_ctrl = if !ctrl_vals.is_empty() { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
+
         (mean_trt - mean_ctrl) / sd
     }
 }
@@ -327,14 +212,14 @@ fn required_effect_linear<R: Rng + ?Sized>(
     mc_sims: usize,
 ) -> f64 {
     if n_remaining == 0 { return 1.0; }
-    
+
     let mut low = 0.001;
     let mut high = (max_val - min_val) / 2.0;
-    
+
     for _ in 0..6 {
         let mid = (low + high) / 2.0;
         let mu_trt = mu_ctrl + mid;
-        
+
         let mut successes = 0;
         for _ in 0..mc_sims {
             let mut wealth = current_wealth;
@@ -342,20 +227,20 @@ fn required_effect_linear<R: Rng + ?Sized>(
             let mut n_trt = 0.0;
             let mut sum_ctrl = 0.0;
             let mut n_ctrl = 0.0;
-            
+
             for j in 1..=n_remaining {
                 let is_trt = rng.gen_bool(0.5);
                 let mu = if is_trt { mu_trt } else { mu_ctrl };
                 let outcome = (rng.gen::<f64>() * 2.0 - 1.0) * sd * 2.0 + mu;
                 let outcome = outcome.clamp(min_val, max_val);
-                
+
                 let mean_trt = if n_trt > 0.0 { sum_trt / n_trt } else { (min_val + max_val) / 2.0 };
                 let mean_ctrl = if n_ctrl > 0.0 { sum_ctrl / n_ctrl } else { (min_val + max_val) / 2.0 };
                 let delta_hat = mean_trt - mean_ctrl;
-                
+
                 if is_trt { n_trt += 1.0; sum_trt += outcome; }
                 else { n_ctrl += 1.0; sum_ctrl += outcome; }
-                
+
                 if j > burn_in {
                     let c_i = (((j - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
                     let x = (outcome - min_val) / (max_val - min_val);
@@ -366,15 +251,15 @@ fn required_effect_linear<R: Rng + ?Sized>(
                     let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
                     wealth *= mult;
                 }
-                
+
                 if wealth >= success_threshold { successes += 1; break; }
             }
         }
-        
+
         let rate = successes as f64 / mc_sims as f64;
         if rate < 0.5 { low = mid; } else { high = mid; }
     }
-    
+
     (low + high) / 2.0
 }
 
@@ -391,38 +276,38 @@ fn required_effect_mad<R: Rng + ?Sized>(
     mc_sims: usize,
 ) -> f64 {
     if n_remaining == 0 { return 1.0; }
-    
+
     let mut low = 0.001;
     let mut high = 2.0; // Cohen's d up to 2
-    
+
     for _ in 0..6 {
         let mid = (low + high) / 2.0;
         let mu_trt = mu_ctrl + mid * sd;
-        
+
         let mut successes = 0;
         for _ in 0..mc_sims {
             let mut wealth = current_wealth;
             let mut outcomes: Vec<f64> = Vec::new();
             let mut treatments: Vec<bool> = Vec::new();
-            
+
             for j in 1..=n_remaining {
                 let is_trt = rng.gen_bool(0.5);
                 let mu = if is_trt { mu_trt } else { mu_ctrl };
                 let outcome = rng.gen::<f64>() * sd * 2.0 - sd + mu;
-                
-                let direction = if outcomes.len() > 0 {
+
+                let direction = if !outcomes.is_empty() {
                     let trt_vals: Vec<f64> = outcomes.iter().zip(treatments.iter())
                         .filter(|(_, &t)| t).map(|(&o, _)| o).collect();
                     let ctrl_vals: Vec<f64> = outcomes.iter().zip(treatments.iter())
                         .filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-                    let m_t = if trt_vals.len() > 0 { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
-                    let m_c = if ctrl_vals.len() > 0 { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
+                    let m_t = if !trt_vals.is_empty() { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
+                    let m_c = if !ctrl_vals.is_empty() { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
                     if m_t > m_c { 1.0 } else if m_t < m_c { -1.0 } else { 0.0 }
                 } else { 0.0 };
-                
+
                 outcomes.push(outcome);
                 treatments.push(is_trt);
-                
+
                 if j > burn_in && outcomes.len() > 1 {
                     let past: Vec<f64> = outcomes[..outcomes.len()-1].to_vec();
                     let med = median(&past);
@@ -435,15 +320,15 @@ fn required_effect_mad<R: Rng + ?Sized>(
                     let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
                     wealth *= mult;
                 }
-                
+
                 if wealth >= success_threshold { successes += 1; break; }
             }
         }
-        
+
         let rate = successes as f64 / mc_sims as f64;
         if rate < 0.5 { low = mid; } else { high = mid; }
     }
-    
+
     (low + high) / 2.0
 }
 
@@ -468,11 +353,11 @@ fn run_simulation<R: Rng + ?Sized>(
     c_max: f64,
 ) -> MethodResults {
     let method_name = if method == Method::LinearERT { "LinearERT" } else { "MAD" };
-    
+
     // Phase 1: Type I Error
     print!("  {} Type I Error... ", method_name);
     io::stdout().flush().unwrap();
-    
+
     let mut null_rejections = 0;
     for _ in 0..n_sims {
         if method == Method::LinearERT {
@@ -520,13 +405,13 @@ fn run_simulation<R: Rng + ?Sized>(
 
         if method == Method::LinearERT {
             let mut proc = LinearERTProcess::new(burn_in, ramp, min_val, max_val);
-            
+
             for i in 1..=n_patients {
                 let is_trt = rng.gen_bool(0.5);
                 let mu = if is_trt { mu_trt } else { mu_ctrl };
                 let outcome = rng.gen::<f64>() * sd * 2.0 - sd + mu;
                 let outcome = outcome.clamp(min_val, max_val);
-                
+
                 proc.update(i, outcome, is_trt);
                 trajectories[sim][i] = proc.wealth;
 
@@ -553,12 +438,12 @@ fn run_simulation<R: Rng + ?Sized>(
             final_effect = proc.current_effect();
         } else {
             let mut proc = MADProcess::new(burn_in, ramp, c_max);
-            
+
             for i in 1..=n_patients {
                 let is_trt = rng.gen_bool(0.5);
                 let mu = if is_trt { mu_trt } else { mu_ctrl };
                 let outcome = rng.gen::<f64>() * sd * 2.0 - sd + mu;
-                
+
                 proc.update(i, outcome, is_trt);
                 trajectories[sim][i] = proc.wealth;
 
@@ -736,7 +621,7 @@ direction = sign(mean_trt - mean_ctrl) # from past data
     <title>Continuous e-RT Simulation Report</title>
     <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
         .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
         h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
@@ -755,7 +640,7 @@ direction = sign(mean_trt - mean_ctrl) # from past data
     <div class="container">
         <h1>Continuous e-RT Simulation Report</h1>
         <p class="timestamp">Generated: {}</p>
-        
+
         <h2>Parameters</h2>
         <table>
             <tr><td>Method:</td><td><strong>{}</strong></td></tr>
@@ -806,7 +691,7 @@ fn build_method_section(
     let mut html = format!(r#"
         <div class="method-section">
         <h2>{} Results</h2>
-        
+
         <h3>Operating Characteristics</h3>
         <table>
             <tr class="highlight"><td>Type I Error:</td><td>{:.2}%</td></tr>
@@ -894,17 +779,15 @@ fn build_method_section(
         ));
     }
 
-    let _success_thresh = 20.0; // Will use actual value
-
     html.push_str(&format!(r#"
         <h3>Visualizations</h3>
-        
+
         <h4>e-Value Trajectories (Median with 95% CI)</h4>
         <div id="plot{}_1" style="width:100%;height:450px;"></div>
-        
+
         <h4>Sample Trajectories (30 runs)</h4>
         <div id="plot{}_2" style="width:100%;height:450px;"></div>
-        
+
         <h4>Stopping Times Distribution</h4>
         <div id="plot{}_3" style="width:100%;height:350px;"></div>
         "#, plot_id, plot_id, plot_id));
@@ -1029,7 +912,7 @@ pub fn run() {
         let cohen_d = ((mu_trt - mu_ctrl) / sd).abs();
         let freq_n = calculate_n_continuous(cohen_d, power);
         println!("\nFrequentist N (Power {:.0}%, d={:.2}): {}", power * 100.0, cohen_d, freq_n);
-        
+
         if get_bool("Add buffer?") {
             let buffer_pct = get_input("Buffer percentage (e.g., 15): ");
             let buffered = (freq_n as f64 * (1.0 + buffer_pct / 100.0)).ceil() as usize;
