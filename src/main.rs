@@ -5,6 +5,7 @@ mod survival;
 mod multistate;
 mod analyze_binary;
 mod analyze_continuous;
+mod compare_methods;
 
 fn main() {
     println!("\n==========================================");
@@ -17,7 +18,8 @@ fn main() {
     println!("  4. Multi-State Simulation");
     println!("  5. Analyze Binary Trial (CSV)");
     println!("  6. Analyze Continuous Trial (CSV)");
-    println!("  7. Exit");
+    println!("  7. Compare Methods (LinearERT vs MAD)");
+    println!("  8. Exit");
 
     print!("\nSelect: ");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
@@ -40,7 +42,8 @@ fn main() {
                 eprintln!("Error: {}", e);
             }
         }
-        "7" => println!("Goodbye!"),
+        "7" => compare_methods::run(),
+        "8" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }
 }
