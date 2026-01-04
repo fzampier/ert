@@ -1245,7 +1245,7 @@ fn build_html_report(
                 name: 'e-value'
             }}
         ], {{
-            yaxis: {{type: 'log', title: 'e-value'}},
+            yaxis: {{type: 'log', title: 'e-value', range: [-0.5, 2]}},
             xaxis: {{title: 'Patients Enrolled'}},
             shapes: [
                 {}
