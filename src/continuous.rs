@@ -7,8 +7,9 @@ use std::fs::File;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input, get_choice,
-    median, mad, calculate_n_continuous, chrono_lite,
+    median, mad, calculate_n_continuous, chrono_lite, t_test_power_continuous,
 };
+use crate::agnostic::{AgnosticERT, Signal, Arm};
 
 // === STRUCTS ===
 
@@ -46,6 +47,9 @@ struct MethodResults {
     trajectories: Vec<Vec<f64>>,
     stop_times: Vec<f64>,
     required_effects: Vec<f64>,
+    // Agnostic comparison
+    agnostic_power: f64,
+    agnostic_avg_stop: f64,
 }
 
 // === LinearERT PROCESS ===
@@ -385,12 +389,22 @@ fn run_simulation<R: Rng + ?Sized>(
     // Phase 2: Power
     print!("  {} Power", method_name);
     if run_futility { print!(" + Futility"); }
-    print!("... ");
+    print!(" + Agnostic... ");
     io::stdout().flush().unwrap();
 
     let mut results: Vec<TrialResult> = Vec::with_capacity(n_sims);
     let mut trajectories: Vec<Vec<f64>> = vec![vec![0.0; n_patients + 1]; n_sims];
     let pb_interval = (n_sims / 20).max(1);
+
+    // Agnostic tracking
+    let mut agnostic_successes = 0;
+    let mut agnostic_stop_times: Vec<usize> = Vec::new();
+    // Threshold for good/bad: midpoint for LinearERT, control mean for MAD
+    let good_threshold = if method == Method::LinearERT {
+        (min_val + max_val) / 2.0
+    } else {
+        mu_ctrl
+    };
 
     for sim in 0..n_sims {
         if sim % pb_interval == 0 { print!("."); io::stdout().flush().unwrap(); }
@@ -400,6 +414,11 @@ fn run_simulation<R: Rng + ?Sized>(
         let mut stop_effect = None;
         let mut futility_info: Option<FutilityInfo> = None;
         let final_effect: f64;
+
+        // Agnostic process for this trial
+        let mut agnostic = AgnosticERT::new(burn_in, ramp, success_threshold);
+        let mut agnostic_stopped = false;
+        let mut agnostic_stop_step: Option<usize> = None;
 
         trajectories[sim][0] = 1.0;
 
@@ -414,6 +433,16 @@ fn run_simulation<R: Rng + ?Sized>(
 
                 proc.update(i, outcome, is_trt);
                 trajectories[sim][i] = proc.wealth;
+
+                // Agnostic signal: higher outcome = good (e.g., more VFD)
+                let signal = Signal {
+                    arm: if is_trt { Arm::Treatment } else { Arm::Control },
+                    good: outcome > good_threshold,
+                };
+                if !agnostic_stopped && agnostic.observe(signal) {
+                    agnostic_stopped = true;
+                    agnostic_stop_step = Some(i);
+                }
 
                 if run_futility && futility_info.is_none() && proc.wealth < futility_watch && i > burn_in {
                     let n_remaining = n_patients - i;
@@ -447,6 +476,16 @@ fn run_simulation<R: Rng + ?Sized>(
                 proc.update(i, outcome, is_trt);
                 trajectories[sim][i] = proc.wealth;
 
+                // Agnostic signal: higher outcome = good
+                let signal = Signal {
+                    arm: if is_trt { Arm::Treatment } else { Arm::Control },
+                    good: outcome > good_threshold,
+                };
+                if !agnostic_stopped && agnostic.observe(signal) {
+                    agnostic_stopped = true;
+                    agnostic_stop_step = Some(i);
+                }
+
                 if run_futility && futility_info.is_none() && proc.wealth < futility_watch && i > burn_in {
                     let n_remaining = n_patients - i;
                     let req = required_effect_mad(
@@ -468,6 +507,14 @@ fn run_simulation<R: Rng + ?Sized>(
                 }
             }
             final_effect = proc.current_effect(sd);
+        }
+
+        // Track agnostic results
+        if agnostic_stopped {
+            agnostic_successes += 1;
+            if let Some(t) = agnostic_stop_step {
+                agnostic_stop_times.push(t);
+            }
         }
 
         results.push(TrialResult {
@@ -514,6 +561,14 @@ fn run_simulation<R: Rng + ?Sized>(
         results.iter().filter(|r| r.futility_info.is_some()).map(|r| r.futility_info.as_ref().unwrap().required_effect).collect()
     } else { Vec::new() };
 
+    // Compute agnostic stats
+    let agnostic_power = (agnostic_successes as f64 / n_sims as f64) * 100.0;
+    let agnostic_avg_stop = if !agnostic_stop_times.is_empty() {
+        agnostic_stop_times.iter().sum::<usize>() as f64 / agnostic_stop_times.len() as f64
+    } else {
+        0.0
+    };
+
     MethodResults {
         _method: method,
         type1_error,
@@ -527,6 +582,8 @@ fn run_simulation<R: Rng + ?Sized>(
         trajectories,
         stop_times,
         required_effects,
+        agnostic_power,
+        agnostic_avg_stop,
     }
 }
 
@@ -541,6 +598,7 @@ fn build_html_report(
     success_threshold: f64, futility_watch: f64,
     burn_in: usize, ramp: usize, c_max: f64,
     seed: Option<u64>, run_futility: bool,
+    t_test_power: f64,
     linear_results: Option<&MethodResults>,
     mad_results: Option<&MethodResults>,
 ) -> String {
@@ -605,6 +663,42 @@ direction = sign(mean_trt - mean_ctrl) # from past data
         format!("<tr><td>Bounds (min, max):</td><td>{}, {}</td></tr>", mn, mx)
     } else { String::new() };
 
+    // Build power comparison section
+    let mut power_comparison = format!(r#"
+        <h2>Power Comparison</h2>
+        <table>
+            <tr><td>t-test (fixed):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">ceiling (traditional)</td></tr>
+    "#, t_test_power);
+
+    if let Some(res) = linear_results {
+        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
+        power_comparison.push_str(&format!(
+            r#"<tr><td>LinearERT:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
+            <tr><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+        "#, power, res.agnostic_power));
+    }
+
+    if let Some(res) = mad_results {
+        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
+        power_comparison.push_str(&format!(
+            r#"<tr><td>MAD-based:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
+            <tr><td>Agnostic (MAD):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+        "#, power, res.agnostic_power));
+    }
+
+    power_comparison.push_str("</table>");
+
+    // Add domain knowledge value
+    if let Some(res) = linear_results {
+        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
+        power_comparison.push_str(&format!(r#"
+        <table>
+            <tr><td>LinearERT domain knowledge:</td><td>+{:.1}%</td></tr>
+            <tr><td>LinearERT sequential cost:</td><td>-{:.1}%</td></tr>
+        </table>
+        "#, power - res.agnostic_power, t_test_power - power));
+    }
+
     let design_effect_row = match method_choice {
         1 => format!("<tr><td>Design Effect (Mean Diff):</td><td><strong>{:.2}</strong></td></tr>", design_effect_linear.unwrap_or(0.0)),
         2 => format!("<tr><td>Design Effect (Cohen's d):</td><td><strong>{:.2}</strong></td></tr>", design_effect_mad.unwrap_or(0.0)),
@@ -662,6 +756,8 @@ direction = sign(mean_trt - mean_ctrl) # from past data
         {}
 
         {}
+
+        {}
     </div>
 </body>
 </html>"#,
@@ -670,6 +766,7 @@ direction = sign(mean_trt - mean_ctrl) # from past data
         bounds_row, design_effect_row,
         n_patients, n_sims, success_threshold, futility_watch,
         burn_in, ramp, c_max, seed_str,
+        power_comparison,
         equations,
         method_sections
     )
@@ -981,6 +1078,39 @@ pub fn run() {
         ))
     } else { None };
 
+    // Traditional t-test power (ceiling)
+    let alpha = 1.0 / success_threshold;
+    let t_test_power = t_test_power_continuous(mu_trt - mu_ctrl, sd, n_patients, alpha) * 100.0;
+
+    // Print console summary
+    println!("\n==========================================");
+    println!("   RESULTS");
+    println!("==========================================");
+
+    println!("\n--- Power Comparison at N={} ---", n_patients);
+    println!("t-test (fixed):      {:.1}%  <- ceiling (traditional)", t_test_power);
+
+    if let Some(ref res) = linear_results {
+        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
+        println!("LinearERT:           {:.1}%  <- domain-aware sequential", power);
+        println!("Agnostic (universal):{:.1}%  <- floor (universal)", res.agnostic_power);
+        println!("\nLinearERT vs Agnostic: +{:.1}% (domain knowledge)", power - res.agnostic_power);
+        println!("LinearERT vs t-test:   -{:.1}% (sequential cost)", t_test_power - power);
+    }
+
+    if let Some(ref res) = mad_results {
+        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
+        if linear_results.is_some() {
+            println!("\nMAD-based:           {:.1}%", power);
+            println!("Agnostic (universal):{:.1}%", res.agnostic_power);
+        } else {
+            println!("MAD-based:           {:.1}%  <- domain-aware sequential", power);
+            println!("Agnostic (universal):{:.1}%  <- floor (universal)", res.agnostic_power);
+            println!("\nMAD vs Agnostic:     +{:.1}% (domain knowledge)", power - res.agnostic_power);
+            println!("MAD vs t-test:       -{:.1}% (sequential cost)", t_test_power - power);
+        }
+    }
+
     // Generate report
     println!("\nGenerating report...");
 
@@ -993,6 +1123,7 @@ pub fn run() {
         success_threshold, futility_watch,
         burn_in, ramp, c_max,
         seed, run_futility,
+        t_test_power,
         linear_results.as_ref(), mad_results.as_ref(),
     );
 

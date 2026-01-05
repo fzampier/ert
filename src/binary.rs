@@ -7,8 +7,9 @@ use std::fs::File;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
-    calculate_n_binary, chrono_lite, BinaryERTProcess,
+    calculate_n_binary, chrono_lite, BinaryERTProcess, z_test_power_binary,
 };
+use crate::agnostic::{AgnosticERT, Signal, Arm};
 
 // --- Monte Carlo: Required Effect Size for Recovery ---
 fn required_effect_for_success<R: Rng + ?Sized>(
@@ -198,14 +199,19 @@ pub fn run() {
     let type1_error = (null_rejections as f64 / n_sims as f64) * 100.0;
     println!("Done. Type I Error: {:.2}%", type1_error);
 
-    // === PHASE 2: POWER & FUTILITY ANALYSIS ===
+    // === PHASE 2: POWER & FUTILITY ANALYSIS (with Agnostic comparison) ===
     print!("Phase 2: Power Analysis");
     if run_futility { print!(" + Futility"); }
+    print!(" + Agnostic");
     println!("...");
     io::stdout().flush().unwrap();
 
     let mut results: Vec<TrialResult> = Vec::with_capacity(n_sims);
     let mut trajectories: Vec<Vec<f64>> = vec![vec![0.0; n_patients + 1]; n_sims];
+
+    // Agnostic e-RT tracking
+    let mut agnostic_successes = 0;
+    let mut agnostic_stop_times: Vec<usize> = Vec::new();
 
     // Store 30 sample trajectories for plotting
     let sample_indices: Vec<usize> = (0..30.min(n_sims)).collect();
@@ -219,10 +225,13 @@ pub fn run() {
         }
 
         let mut proc = BinaryERTProcess::new(burn_in, ramp);
+        let mut agnostic = AgnosticERT::new(burn_in, ramp, success_threshold);
         let mut stopped = false;
         let mut stop_step = None;
         let mut stop_diff = None;
         let mut futility_info: Option<FutilityInfo> = None;
+        let mut agnostic_stopped = false;
+        let mut agnostic_stop_step: Option<usize> = None;
 
         trajectories[sim][0] = 1.0;
 
@@ -233,6 +242,18 @@ pub fn run() {
 
             proc.update(i, outcome, is_trt);
             trajectories[sim][i] = proc.wealth;
+
+            // Agnostic e-RT: translate binary outcome to signal
+            // For binary: event (outcome=1) is "bad" (higher is worse)
+            // Treatment should have FEWER events, so event=bad
+            let signal = Signal {
+                arm: if is_trt { Arm::Treatment } else { Arm::Control },
+                good: outcome == 0.0, // no event = good
+            };
+            if !agnostic_stopped && agnostic.observe(signal) {
+                agnostic_stopped = true;
+                agnostic_stop_step = Some(i);
+            }
 
             // Futility info (if enabled)
             if run_futility && futility_info.is_none() && proc.wealth < futility_watch && i > burn_in {
@@ -254,11 +275,19 @@ pub fn run() {
                 });
             }
 
-            // Success
+            // Success (binary e-RT)
             if !stopped && proc.wealth > success_threshold {
                 stopped = true;
                 stop_step = Some(i);
                 stop_diff = Some(proc.current_risk_diff());
+            }
+        }
+
+        // Track agnostic results
+        if agnostic_stopped {
+            agnostic_successes += 1;
+            if let Some(t) = agnostic_stop_step {
+                agnostic_stop_times.push(t);
             }
         }
 
@@ -327,15 +356,40 @@ pub fn run() {
         None
     };
 
+    // === COMPUTE AGNOSTIC STATISTICS ===
+    let agnostic_power = (agnostic_successes as f64 / n_sims as f64) * 100.0;
+    let agnostic_avg_stop = if !agnostic_stop_times.is_empty() {
+        agnostic_stop_times.iter().sum::<usize>() as f64 / agnostic_stop_times.len() as f64
+    } else {
+        0.0
+    };
+
+    // === TRADITIONAL POWER (Z-TEST) ===
+    let alpha = 1.0 / success_threshold;
+    let z_test_power = z_test_power_binary(p_ctrl, p_trt, n_patients, alpha) * 100.0;
+
     // === PRINT CONSOLE SUMMARY ===
     println!("\n==========================================");
     println!("   RESULTS");
     println!("==========================================");
     println!("Type I Error:    {:.2}%", type1_error);
-    println!("Power:           {:.1}%", (success_count as f64/n_sims as f64)*100.0);
+
+    // Three-tier power comparison
+    println!("\n--- Power Comparison at N={} ---", n_patients);
+    println!("Z-test (fixed):      {:.1}%  <- ceiling (traditional)", z_test_power);
+    println!("e-RT binary:         {:.1}%  <- domain-aware sequential", (success_count as f64/n_sims as f64)*100.0);
+    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+
+    println!("\nDomain knowledge:    +{:.1}%", (success_count as f64/n_sims as f64)*100.0 - agnostic_power);
+    println!("Sequential cost:     -{:.1}%", z_test_power - (success_count as f64/n_sims as f64)*100.0);
+
     if success_count > 0 {
-        println!("Avg Stop:        {:.0} ({:.0}% of N)", avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0);
-        println!("Type M Error:    {:.2}x", type_m_error);
+        println!("\n--- Stopping Analysis ---");
+        println!("e-RT Avg Stop:       {:.0} ({:.0}% of N)", avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0);
+        if !agnostic_stop_times.is_empty() {
+            println!("Agnostic Avg Stop:   {:.0} ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
+        }
+        println!("Type M Error:        {:.2}x", type_m_error);
     }
 
     // === GENERATE HTML REPORT ===
@@ -386,6 +440,8 @@ pub fn run() {
         type1_error, success_count, no_stop_count,
         avg_stop_n, avg_diff_stop, avg_diff_final, type_m_error,
         futility_stats, run_futility,
+        // Power comparison
+        z_test_power, agnostic_power, agnostic_avg_stop,
         // Plot data
         &x_axis, &y_median, &y_lower, &y_upper,
         &sample_trajectories, &stop_times, &required_arrs,
@@ -402,9 +458,10 @@ fn build_html_report(
     p_ctrl: f64, p_trt: f64, design_arr: f64, n_patients: usize, n_sims: usize,
     success_threshold: f64, futility_watch: f64, burn_in: usize, ramp: usize, seed: Option<u64>,
     type1_error: f64, success_count: usize, no_stop_count: usize,
-    avg_stop_n: f64, avg_diff_stop: f64, avg_diff_final: f64, type_m_error: f64,
+    avg_stop_n: f64, _avg_diff_stop: f64, _avg_diff_final: f64, type_m_error: f64,
     futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
     run_futility: bool,
+    z_test_power: f64, agnostic_power: f64, agnostic_avg_stop: f64,
     x_axis: &[usize], y_median: &[f64], y_lower: &[f64], y_upper: &[f64],
     sample_trajectories: &[&Vec<f64>], stop_times: &[f64], required_arrs: &[f64],
 ) -> String {
@@ -539,17 +596,26 @@ fn build_html_report(
         <h2>Operating Characteristics</h2>
         <table>
             <tr class="highlight"><td>Type I Error:</td><td>{:.2}%</td></tr>
-            <tr class="highlight"><td>Power (Success Rate):</td><td>{:.1}%</td></tr>
             <tr><td>No Stop:</td><td>{} ({:.1}%)</td></tr>
         </table>
 
-        <h2>Success Analysis</h2>
+        <h2>Power Comparison</h2>
         <table>
-            <tr><td>Number of Successes:</td><td>{}</td></tr>
-            <tr><td>Average Stopping Point:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
-            <tr><td>Effect at Stop:</td><td>{:.1}% ARR</td></tr>
-            <tr><td>Effect at End:</td><td>{:.1}% ARR</td></tr>
-            <tr><td>Type M Error (Magnification):</td><td>{:.2}x</td></tr>
+            <tr><td>Z-test (fixed):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">ceiling (traditional)</td></tr>
+            <tr><td>e-RT binary:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
+            <tr><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+        </table>
+        <table>
+            <tr><td>Domain knowledge value:</td><td>+{:.1}%</td></tr>
+            <tr><td>Sequential cost:</td><td>-{:.1}%</td></tr>
+        </table>
+
+        <h2>Stopping Analysis</h2>
+        <table>
+            <tr><td>Successes (e-RT):</td><td>{}</td></tr>
+            <tr><td>e-RT Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
+            <tr><td>Agnostic Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
+            <tr><td>Type M Error:</td><td>{:.2}x</td></tr>
         </table>
 
         {}
@@ -612,11 +678,19 @@ fn build_html_report(
         p_ctrl * 100.0, p_trt * 100.0, design_arr * 100.0, n_patients, n_sims,
         success_threshold, futility_watch, burn_in, ramp, seed_str,
         // Operating characteristics
-        type1_error, (success_count as f64 / n_sims as f64) * 100.0,
+        type1_error,
         no_stop_count, (no_stop_count as f64 / n_sims as f64) * 100.0,
-        // Success analysis
-        success_count, avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0,
-        avg_diff_stop * 100.0, avg_diff_final * 100.0, type_m_error,
+        // Power comparison
+        z_test_power,
+        (success_count as f64 / n_sims as f64) * 100.0,
+        agnostic_power,
+        (success_count as f64 / n_sims as f64) * 100.0 - agnostic_power, // domain knowledge
+        z_test_power - (success_count as f64 / n_sims as f64) * 100.0,   // sequential cost
+        // Stopping analysis
+        success_count,
+        avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0,
+        agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0,
+        type_m_error,
         // Futility section
         futility_html,
         // Required ARR plot

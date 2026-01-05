@@ -303,3 +303,98 @@ pub fn calculate_n_continuous(cohen_d: f64, power: f64) -> usize {
     2 * n_per_arm
 }
 
+/// Standard normal CDF approximation
+pub fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// Error function approximation (Abramowitz and Stegun)
+fn erf(x: f64) -> f64 {
+    let a1 =  0.254829592;
+    let a2 = -0.284496736;
+    let a3 =  1.421413741;
+    let a4 = -1.453152027;
+    let a5 =  1.061405429;
+    let p  =  0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    sign * y
+}
+
+/// Calculate z-test power for binary endpoint given sample size
+/// p_ctrl, p_trt: event rates
+/// n_total: total sample size (assumes 1:1 allocation)
+/// alpha: significance level (two-sided)
+pub fn z_test_power_binary(p_ctrl: f64, p_trt: f64, n_total: usize, alpha: f64) -> f64 {
+    let n_per_arm = n_total as f64 / 2.0;
+    let delta = (p_ctrl - p_trt).abs();
+
+    // Pooled standard error under H1
+    let var_trt = p_trt * (1.0 - p_trt);
+    let var_ctrl = p_ctrl * (1.0 - p_ctrl);
+    let se = ((var_trt + var_ctrl) / n_per_arm).sqrt();
+
+    if se < 1e-10 {
+        return 1.0;
+    }
+
+    // z_alpha for two-sided test
+    let z_alpha = z_from_alpha(alpha);
+
+    // Effect size in z-scale
+    let z_effect = delta / se;
+
+    // Power = P(|Z| > z_alpha | H1)
+    normal_cdf(z_effect - z_alpha)
+}
+
+/// Get z-score from alpha (two-sided)
+fn z_from_alpha(alpha: f64) -> f64 {
+    // Common values
+    if (alpha - 0.05).abs() < 0.001 { return 1.96; }
+    if (alpha - 0.01).abs() < 0.001 { return 2.576; }
+    if (alpha - 0.10).abs() < 0.001 { return 1.645; }
+
+    // Binary search for general case
+    let target = 1.0 - alpha / 2.0;
+    let mut low = 0.0;
+    let mut high = 5.0;
+    for _ in 0..50 {
+        let mid = (low + high) / 2.0;
+        if normal_cdf(mid) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    (low + high) / 2.0
+}
+
+/// Calculate t-test power for continuous endpoint given sample size
+/// effect: mean difference (mu_trt - mu_ctrl)
+/// sd: common standard deviation
+/// n_total: total sample size (assumes 1:1 allocation)
+/// alpha: significance level (two-sided)
+pub fn t_test_power_continuous(effect: f64, sd: f64, n_total: usize, alpha: f64) -> f64 {
+    let n_per_arm = n_total as f64 / 2.0;
+
+    // Standard error of the difference
+    let se = sd * (2.0 / n_per_arm).sqrt();
+
+    if se < 1e-10 {
+        return 1.0;
+    }
+
+    // z_alpha for two-sided test
+    let z_alpha = z_from_alpha(alpha);
+
+    // Effect size in z-scale (non-centrality parameter)
+    let z_effect = effect.abs() / se;
+
+    // Power = P(|Z| > z_alpha | H1)
+    normal_cdf(z_effect - z_alpha)
+}
+
