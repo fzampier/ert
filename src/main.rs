@@ -3,6 +3,7 @@ mod binary;
 mod continuous;
 mod survival;
 mod multistate;
+mod agnostic;
 mod analyze_binary;
 mod analyze_continuous;
 mod compare_methods;
@@ -16,10 +17,11 @@ fn main() {
     println!("  2. Continuous Endpoint Simulation");
     println!("  3. Survival Endpoint Simulation");
     println!("  4. Multi-State Simulation");
-    println!("  5. Analyze Binary Trial (CSV)");
-    println!("  6. Analyze Continuous Trial (CSV)");
-    println!("  7. Compare Methods (LinearERT vs MAD)");
-    println!("  8. Exit");
+    println!("  5. Agnostic e-RT (Universal)");
+    println!("  6. Analyze Binary Trial (CSV)");
+    println!("  7. Analyze Continuous Trial (CSV)");
+    println!("  8. Compare Methods (LinearERT vs MAD)");
+    println!("  9. Exit");
 
     print!("\nSelect: ");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
@@ -32,18 +34,19 @@ fn main() {
         "2" => continuous::run(),
         "3" => survival::run(),
         "4" => multistate::run(),
-        "5" => {
+        "5" => agnostic::run(),
+        "6" => {
             if let Err(e) = analyze_binary::run() {
                 eprintln!("Error: {}", e);
             }
         }
-        "6" => {
+        "7" => {
             if let Err(e) = analyze_continuous::run() {
                 eprintln!("Error: {}", e);
             }
         }
-        "7" => compare_methods::run(),
-        "8" => println!("Goodbye!"),
+        "8" => compare_methods::run(),
+        "9" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }
 }
