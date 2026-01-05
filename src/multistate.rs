@@ -566,13 +566,11 @@ th{{background:#f1f3f4}}
 </table>
 
 <h2>Type M Error (Effect Magnification)</h2>
-<p>When e-RTms rejects early, is the observed effect inflated?</p>
 <table>
-<tr><td>Effect at stop:</td><td>{:.3} (good rate diff)</td></tr>
-<tr><td>Effect at final:</td><td>{:.3} (good rate diff)</td></tr>
-<tr class="hl"><td>Type M ratio:</td><td>{:.2}x {}</td></tr>
+<tr><td>Effect at stop:</td><td>{:.3}</td></tr>
+<tr><td>Effect at final:</td><td>{:.3}</td></tr>
+<tr class="hl"><td>Type M ratio:</td><td>{:.2}x</td></tr>
 </table>
-<p class="note">Type M &gt; 1.0 means effect is exaggerated at early stopping. Type M = 1.0 is ideal.</p>
 
 <h2>e-Value Trajectories</h2>
 <div id="p1" style="height:400px"></div>
@@ -601,14 +599,6 @@ Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{co
 }});
 </script>
 
-<h2>Interpretation</h2>
-<ul>
-<li><strong>Proportional OR = {:.2}</strong>: Treatment patients are {:.1}x more likely to be in a better state.</li>
-<li><strong>Mann-Whitney = {:.1}%</strong>: A random treatment patient has {:.1}% chance of better outcome than a random control patient.</li>
-<li><strong>e-RTms</strong> tests the same hypothesis sequentially by betting on favorable transitions.</li>
-</ul>
-
-<p class="note">Note: Proportional odds assumes constant OR across cut-points. e-RTms makes no distributional assumptions.</p>
 </body></html>"#,
         chrono_lite(),
         n_patients, n_sims, threshold,
@@ -620,9 +610,7 @@ Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{co
         bench.power_at_n * 100.0, n_patients,
         verdict, null.type1_error, alt.median_transitions, alt.avg_stop_trans,
         alt.avg_effect_at_stop, alt.avg_effect_at_final, alt.type_m_error,
-        if alt.type_m_error > 1.5 { "(⚠ inflated)" } else if alt.type_m_error < 0.8 { "(deflated)" } else { "(acceptable)" },
-        null.trajectories, alt.trajectories, alt.stop_times, threshold,
-        bench.or, bench.or, bench.mann_whitney * 100.0, bench.mann_whitney * 100.0)
+        null.trajectories, alt.trajectories, alt.stop_times, threshold)
 }
 
 // === MAIN ===
@@ -697,14 +685,9 @@ pub fn run() {
 
     // Type M error
     println!("\n--- Type M Error (Magnification) ---");
-    println!("Effect at stop:  {:.3} (good rate diff)", alt.avg_effect_at_stop);
-    println!("Effect at final: {:.3} (good rate diff)", alt.avg_effect_at_final);
+    println!("Effect at stop:  {:.3}", alt.avg_effect_at_stop);
+    println!("Effect at final: {:.3}", alt.avg_effect_at_final);
     println!("Type M ratio:    {:.2}x", alt.type_m_error);
-    if alt.type_m_error > 1.5 {
-        println!("⚠ Early stopping inflates effect by {:.0}%", (alt.type_m_error - 1.0) * 100.0);
-    } else if alt.type_m_error < 0.8 {
-        println!("Note: Effect at stop is smaller than final (unusual)");
-    }
 
     // === HEAD-TO-HEAD COMPARISON ===
     println!("\n==========================================");
