@@ -5,6 +5,8 @@ use rand::RngCore;
 use std::io::{self, Write};
 use std::fs::File;
 
+use crate::agnostic::{AgnosticERT, Signal, Arm};
+
 // === HELPERS ===
 
 fn get_input(prompt: &str) -> f64 {
@@ -84,6 +86,39 @@ fn calculate_n_survival(target_hr: f64, power: f64) -> usize {
     let log_hr = target_hr.ln();
     let req_events = (4.0 * ((z_alpha + z_beta) / log_hr).powi(2)).ceil() as usize;
     req_events
+}
+
+/// Calculate log-rank test power given number of events
+/// Uses Schoenfeld's formula: Power = Φ(|log(HR)| × √(d/4) - z_α)
+fn log_rank_power(target_hr: f64, n_events: usize, alpha: f64) -> f64 {
+    let z_alpha = z_from_alpha(alpha);
+    let log_hr = target_hr.ln().abs();
+    let z_effect = log_hr * (n_events as f64 / 4.0).sqrt();
+    normal_cdf(z_effect - z_alpha)
+}
+
+fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+fn erf(x: f64) -> f64 {
+    let a1 =  0.254829592;
+    let a2 = -0.284496736;
+    let a3 =  1.421413741;
+    let a4 = -1.453152027;
+    let a5 =  1.061405429;
+    let p  =  0.3275911;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    sign * y
+}
+
+fn z_from_alpha(alpha: f64) -> f64 {
+    if (alpha - 0.05).abs() < 0.001 { return 1.96; }
+    if (alpha - 0.01).abs() < 0.001 { return 2.576; }
+    1.96 // default
 }
 
 // === DATA STRUCTURES ===
@@ -213,6 +248,44 @@ fn compute_e_survival(
     }
 
     wealth
+}
+
+// === COMPUTE AGNOSTIC e-RT FOR SURVIVAL ===
+
+fn compute_agnostic_survival(
+    data: &SurvivalData,
+    burn_in: usize,
+    ramp: usize,
+    threshold: f64,
+) -> (bool, Option<usize>) {
+    let n = data.time.len();
+
+    // Sort by event time
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
+
+    let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
+
+    // Process ALL patients (events AND censored) in time order
+    // For survival, treat like binary: event=bad, no event=good
+    // Same mapping for both arms (symmetric under null)
+    // Treatment should have MORE good outcomes (fewer events) under H1
+    for (i, &idx) in indices.iter().enumerate() {
+        let is_event = data.status[idx] == 1;
+        let is_trt = data.treatment[idx] == 1;
+
+        // Symmetric signal: event = bad for both arms (like binary)
+        let signal = Signal {
+            arm: if is_trt { Arm::Treatment } else { Arm::Control },
+            good: !is_event, // no event (censored/survived) = good
+        };
+
+        if agnostic.observe(signal) {
+            return (true, Some(i + 1));
+        }
+    }
+
+    (false, None)
 }
 
 // === CALCULATE OBSERVED HR ===
@@ -393,12 +466,17 @@ pub fn run() {
     // === PHASE 2: POWER ===
     print!("Phase 2: Power (HR={:.2})", target_hr);
     if run_futility { print!(" + Futility"); }
+    print!(" + Agnostic");
     println!("...");
     io::stdout().flush().unwrap();
 
     let mut results: Vec<TrialResult> = Vec::with_capacity(n_sims);
     let mut trajectories: Vec<Vec<f64>> = Vec::with_capacity(n_sims);
     let pb_interval = (n_sims / 20).max(1);
+
+    // Agnostic tracking
+    let mut agnostic_successes = 0;
+    let mut agnostic_stop_events: Vec<usize> = Vec::new();
 
     for sim in 0..n_sims {
         if sim % pb_interval == 0 {
@@ -408,6 +486,15 @@ pub fn run() {
 
         let trial = simulate_trial(&mut *rng, n_patients, target_hr, shape, scale, cens_prop);
         let wealth = compute_e_survival(&trial, burn_in, ramp, lambda_max);
+
+        // Run agnostic on the same trial
+        let (agn_success, agn_stop) = compute_agnostic_survival(&trial, burn_in, ramp, success_threshold);
+        if agn_success {
+            agnostic_successes += 1;
+            if let Some(e) = agn_stop {
+                agnostic_stop_events.push(e);
+            }
+        }
 
         trajectories.push(wealth.clone());
 
@@ -500,17 +587,44 @@ pub fn run() {
         Vec::new()
     };
 
+    // === COMPUTE AGNOSTIC STATS ===
+    let agnostic_power = (agnostic_successes as f64 / n_sims as f64) * 100.0;
+    let agnostic_avg_stop = if !agnostic_stop_events.is_empty() {
+        agnostic_stop_events.iter().sum::<usize>() as f64 / agnostic_stop_events.len() as f64
+    } else {
+        0.0
+    };
+
     // === CONSOLE OUTPUT ===
     println!("\n==========================================");
     println!("   RESULTS");
     println!("==========================================");
     println!("Type I Error:    {:.2}%", type1_error);
-    println!("Power:           {:.1}%", (success_count as f64 / n_sims as f64) * 100.0);
+
+    // Estimate expected events for log-rank power calculation
+    // With censoring proportion c, expect roughly N*(1-c) events
+    let expected_events = (n_patients as f64 * (1.0 - cens_prop)).round() as usize;
+    let alpha = 1.0 / success_threshold;
+    let lr_power = log_rank_power(target_hr, expected_events, alpha) * 100.0;
+
+    // Three-tier power comparison
+    let e_surv_power = (success_count as f64 / n_sims as f64) * 100.0;
+    println!("\n--- Power Comparison at N={} (~{} events) ---", n_patients, expected_events);
+    println!("Log-rank (fixed):    {:.1}%  <- ceiling (traditional)", lr_power);
+    println!("e-survival:          {:.1}%  <- domain-aware sequential", e_surv_power);
+    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+    println!("\nDomain knowledge:    {:+.1}%", e_surv_power - agnostic_power);
+    println!("Sequential cost:     -{:.1}%", lr_power - e_surv_power);
+
     if success_count > 0 {
-        println!("Avg Stop:        {:.0} events ({:.0}% of N)", avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0);
-        println!("HR @ Stop:       {:.3}", avg_hr_stop);
-        println!("HR @ End:        {:.3}", avg_hr_final);
-        println!("Type M Error:    {:.2}x", type_m_error);
+        println!("\n--- Stopping Analysis ---");
+        println!("e-surv Avg Stop:     {:.0} events ({:.0}% of N)", avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0);
+        if !agnostic_stop_events.is_empty() {
+            println!("Agnostic Avg Stop:   {:.0} events ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
+        }
+        println!("HR @ Stop:           {:.3}", avg_hr_stop);
+        println!("HR @ End:            {:.3}", avg_hr_final);
+        println!("Type M Error:        {:.2}x", type_m_error);
     }
 
     // === GENERATE HTML REPORT ===
@@ -526,6 +640,7 @@ pub fn run() {
         avg_stop_event, avg_hr_stop, avg_hr_final, type_m_error,
         futility_stats,
         &trajectories, &stop_events, &required_hrs,
+        lr_power / 100.0, agnostic_power, agnostic_avg_stop,
     );
 
     let mut file = File::create("survival_report.html").unwrap();
@@ -545,6 +660,7 @@ fn build_html_report(
     avg_stop_event: f64, avg_hr_stop: f64, avg_hr_final: f64, type_m_error: f64,
     futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
     trajectories: &[Vec<f64>], stop_events: &[f64], required_hrs: &[f64],
+    log_rank_power: f64, agnostic_power: f64, agnostic_avg_stop: f64,
 ) -> String {
     let timestamp = chrono_lite();
     let seed_str = seed.map_or("random".to_string(), |s| s.to_string());
@@ -693,6 +809,16 @@ Wⱼ = Wⱼ₋₁ × (1 + λⱼ × Uⱼ)             # wealth update (events onl
             <tr><td>No Stop:</td><td>{} ({:.1}%)</td></tr>
         </table>
 
+        <h2>Power Comparison (Three-Tier Hierarchy)</h2>
+        <table>
+            <tr style="background:#e8f8e8;"><td>Log-rank (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
+            <tr style="background:#fff8e8;"><td>e-survival (sequential):</td><td><strong>{:.1}%</strong></td><td>← domain-aware sequential</td></tr>
+            <tr style="background:#f8e8e8;"><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td>← floor (universal)</td></tr>
+            <tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-survival − agnostic)</td></tr>
+            <tr><td>Sequential cost:</td><td>−{:.1}%</td><td>(log-rank − e-survival)</td></tr>
+        </table>
+        <p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
+
         <h2>Success Analysis</h2>
         <table>
             <tr><td>Number of Successes:</td><td>{}</td></tr>
@@ -762,6 +888,12 @@ Wⱼ = Wⱼ₋₁ × (1 + λⱼ × Uⱼ)             # wealth update (events onl
         burn_in, ramp, lambda_max, seed_str,
         type1_error, (success_count as f64 / n_sims as f64) * 100.0,
         no_stop_count, (no_stop_count as f64 / n_sims as f64) * 100.0,
+        // Power comparison section
+        log_rank_power * 100.0,
+        (success_count as f64 / n_sims as f64) * 100.0, // e-survival power
+        agnostic_power,
+        (success_count as f64 / n_sims as f64) * 100.0 - agnostic_power, // domain knowledge value
+        log_rank_power * 100.0 - (success_count as f64 / n_sims as f64) * 100.0, // sequential cost
         success_count,
         avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0,
         avg_hr_stop, avg_hr_final, type_m_error,
