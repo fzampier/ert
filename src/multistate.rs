@@ -5,7 +5,7 @@ use rand::RngCore;
 use std::fs::File;
 use std::io::{self, Write};
 
-use crate::ert_core::{get_input, get_input_usize, get_bool, get_optional_input, chrono_lite, normal_cdf, normal_quantile};
+use crate::ert_core::{get_input, get_input_usize, get_optional_input, chrono_lite, normal_cdf, normal_quantile};
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
 // === STATES ===
@@ -38,6 +38,16 @@ impl TransitionMatrix {
         TransitionMatrix::new([
             [0.870, 0.050, 0.050, 0.030], // Ward
             [0.090, 0.900, 0.000, 0.010], // ICU
+            [0.000, 0.000, 1.000, 0.000], // Home
+            [0.000, 0.000, 0.000, 1.000], // Dead
+        ])
+    }
+
+    // Small realistic effect: ~5% absolute improvement in Home at day 28
+    fn small_treatment() -> Self {
+        TransitionMatrix::new([
+            [0.875, 0.060, 0.040, 0.025], // Ward: slightly better discharge
+            [0.080, 0.907, 0.000, 0.013], // ICU: 8% vs 7% step-down rate
             [0.000, 0.000, 1.000, 0.000], // Home
             [0.000, 0.000, 0.000, 1.000], // Dead
         ])
@@ -263,12 +273,15 @@ pub fn run() {
     println!("Model: Ward, ICU, Home (abs), Dead (abs)");
     println!("Start: ICU | Follow-up: 28 days\n");
 
-    let use_default = get_bool("Use default transition matrices?");
-    let (p_ctrl, p_trt) = if use_default {
-        println!("Using defaults: Ctrl ICU->Ward 7%, Trt ICU->Ward 9%");
-        (TransitionMatrix::default_control(), TransitionMatrix::default_treatment())
+    println!("Effect size:");
+    println!("  1. Large (OR~1.6, Home +15%)");
+    println!("  2. Small (OR~1.2, Home +5%) - more realistic");
+    let effect_choice = get_input_usize("Select (1 or 2): ");
+    let (p_ctrl, p_trt) = if effect_choice == 2 {
+        println!("Using small effect: ICU->Ward 7%→8%");
+        (TransitionMatrix::default_control(), TransitionMatrix::small_treatment())
     } else {
-        println!("Custom not implemented, using defaults.");
+        println!("Using large effect: ICU->Ward 7%→9%");
         (TransitionMatrix::default_control(), TransitionMatrix::default_treatment())
     };
 
