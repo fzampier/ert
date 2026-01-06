@@ -574,23 +574,13 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
     <title>Method Comparison: e-RTo vs e-RTc</title>
     <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1400px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; margin-top: 30px; }}
-        h3 {{ color: #7f8c8d; }}
-        table {{ border-collapse: collapse; margin: 15px 0; width: 100%; }}
-        th, td {{ padding: 12px 16px; border-bottom: 1px solid #eee; text-align: left; }}
-        th {{ background: #f8f9fa; color: #7f8c8d; }}
+        body {{ font-family: monospace; max-width: 1200px; margin: 0 auto; padding: 20px; background: #fff; }}
+        h2 {{ border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 20px; }}
+        table {{ border-collapse: collapse; margin: 10px 0; }}
+        th, td {{ padding: 6px 12px; text-align: left; }}
+        th {{ background: #f8f8f8; }}
         .linear {{ color: #1f77b4; font-weight: bold; }}
         .mad {{ color: #ff7f0e; font-weight: bold; }}
-        .winner {{ background: #d4edda !important; }}
-        .comparison-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
-        .metric-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; }}
-        .metric-value {{ font-size: 2em; font-weight: bold; }}
-        .metric-label {{ color: #7f8c8d; margin-top: 5px; }}
-        .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
     </style>
 </head>
 <body>

@@ -455,32 +455,25 @@ pub fn run() {
 }
 
 fn build_html_report(
-    p_ctrl: f64, p_trt: f64, design_arr: f64, n_patients: usize, n_sims: usize,
-    success_threshold: f64, futility_watch: f64, burn_in: usize, ramp: usize, seed: Option<u64>,
-    type1_error: f64, success_count: usize, no_stop_count: usize,
-    avg_stop_n: f64, _avg_diff_stop: f64, _avg_diff_final: f64, type_m_error: f64,
-    futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
-    run_futility: bool,
-    z_test_power: f64, agnostic_power: f64, agnostic_avg_stop: f64,
+    _p_ctrl: f64, _p_trt: f64, _design_arr: f64, n_patients: usize, n_sims: usize,
+    success_threshold: f64, futility_watch: f64, _burn_in: usize, _ramp: usize, _seed: Option<u64>,
+    type1_error: f64, success_count: usize, _no_stop_count: usize,
+    _avg_stop_n: f64, _avg_diff_stop: f64, _avg_diff_final: f64, _type_m_error: f64,
+    _futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
+    _run_futility: bool,
+    z_test_power: f64, agnostic_power: f64, _agnostic_avg_stop: f64,
     x_axis: &[usize], y_median: &[f64], y_lower: &[f64], y_upper: &[f64],
-    sample_trajectories: &[&Vec<f64>], stop_times: &[f64], required_arrs: &[f64],
+    sample_trajectories: &[&Vec<f64>], stop_times: &[f64], _required_arrs: &[f64],
 ) -> String {
-    let seed_str = match seed {
-        Some(s) => s.to_string(),
-        None => "random".to_string(),
-    };
-
     let timestamp = chrono_lite();
+    let power = (success_count as f64 / n_sims as f64) * 100.0;
 
-    // Convert data to JSON strings for Plotly
-    let x_json: String = format!("{:?}", x_axis);
-    let median_json: String = format!("{:?}", y_median);
-    let lower_json: String = format!("{:?}", y_lower);
-    let upper_json: String = format!("{:?}", y_upper);
-    let stop_times_json: String = format!("{:?}", stop_times);
-    let required_arrs_json: String = format!("{:?}", required_arrs);
+    let x_json = format!("{:?}", x_axis);
+    let median_json = format!("{:?}", y_median);
+    let lower_json = format!("{:?}", y_lower);
+    let upper_json = format!("{:?}", y_upper);
+    let stop_times_json = format!("{:?}", stop_times);
 
-    // Sample trajectories JSON
     let mut sample_traces = String::new();
     for (idx, traj) in sample_trajectories.iter().enumerate() {
         let downsampled: Vec<f64> = traj.iter().enumerate()
@@ -493,216 +486,37 @@ fn build_html_report(
         ));
     }
 
-    // Futility section HTML
-    let futility_html = if run_futility {
-        if let Some((n_trig, med_patient, med_arr, q25, q50, q75, trig_success)) = futility_stats {
-            format!(r#"
-            <h2>Futility Analysis</h2>
-            <table>
-                <tr><td>Trials triggering (wealth &lt; {:.1}):</td><td><strong>{} ({:.1}%)</strong></td></tr>
-                <tr><td>Median patient at trigger:</td><td>{:.0} ({:.0}% of N)</td></tr>
-                <tr><td>Median required ARR:</td><td>{:.1}%</td></tr>
-                <tr><td>Design ARR:</td><td>{:.1}%</td></tr>
-                <tr><td>Ratio (Required/Design) - 25th pctl:</td><td>{:.2}x</td></tr>
-                <tr><td>Ratio (Required/Design) - Median:</td><td>{:.2}x</td></tr>
-                <tr><td>Ratio (Required/Design) - 75th pctl:</td><td>{:.2}x</td></tr>
-                <tr><td>Triggered trials that succeeded:</td><td>{} ({:.1}%)</td></tr>
-            </table>
-            "#,
-            futility_watch, n_trig, (n_trig as f64 / n_sims as f64) * 100.0,
-            med_patient, (med_patient / n_patients as f64) * 100.0,
-            med_arr * 100.0, design_arr * 100.0,
-            q25, q50, q75,
-            trig_success, (trig_success as f64 / n_trig as f64) * 100.0)
-        } else {
-            "<h2>Futility Analysis</h2><p>No trials triggered futility watch.</p>".to_string()
-        }
-    } else {
-        "".to_string()
-    };
-
-    // Required ARR plot (only if futility enabled and data exists)
-    let required_arr_plot = if run_futility && !required_arrs.is_empty() {
-        format!(r#"
-        <h3>Required ARR Distribution (at Futility Trigger)</h3>
-        <div id="plot4" style="width:100%;height:400px;"></div>
-        <script>
-            Plotly.newPlot('plot4', [{{
-                type: 'histogram',
-                x: {},
-                marker: {{color: 'steelblue'}},
-                name: 'Required ARR'
-            }}], {{
-                shapes: [{{
-                    type: 'line',
-                    x0: {:.1}, x1: {:.1},
-                    y0: 0, y1: 1,
-                    yref: 'paper',
-                    line: {{color: 'red', width: 2, dash: 'dash'}}
-                }}],
-                xaxis: {{title: 'Required ARR (%)'}},
-                yaxis: {{title: 'Count'}},
-                annotations: [{{
-                    x: {:.1}, y: 1, yref: 'paper',
-                    text: 'Design ARR', showarrow: false,
-                    font: {{color: 'red'}}
-                }}]
-            }});
-        </script>
-        "#, required_arrs_json, design_arr * 100.0, design_arr * 100.0, design_arr * 100.0)
-    } else {
-        "".to_string()
-    };
-
     format!(r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Binary e-RT Simulation Report</title>
-    <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; margin-top: 30px; }}
-        h3 {{ color: #7f8c8d; }}
-        table {{ border-collapse: collapse; margin: 15px 0; }}
-        td {{ padding: 8px 16px; border-bottom: 1px solid #eee; }}
-        td:first-child {{ color: #7f8c8d; }}
-        .highlight {{ background: #e8f4f8; font-weight: bold; }}
-        .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Binary e-RT Simulation Report</h1>
-        <p class="timestamp">Generated: {}</p>
-
-        <h2>Parameters</h2>
-        <table>
-            <tr><td>Control Event Rate:</td><td>{:.1}%</td></tr>
-            <tr><td>Treatment Event Rate:</td><td>{:.1}%</td></tr>
-            <tr><td>Design ARR:</td><td><strong>{:.1}%</strong></td></tr>
-            <tr><td>Sample Size (N):</td><td>{}</td></tr>
-            <tr><td>Simulations:</td><td>{}</td></tr>
-            <tr><td>Success Threshold (1/α):</td><td>{}</td></tr>
-            <tr><td>Futility Watch:</td><td>{}</td></tr>
-            <tr><td>Burn-in:</td><td>{}</td></tr>
-            <tr><td>Ramp:</td><td>{}</td></tr>
-            <tr><td>Seed:</td><td>{}</td></tr>
-        </table>
-
-        <h2>Operating Characteristics</h2>
-        <table>
-            <tr class="highlight"><td>Type I Error:</td><td>{:.2}%</td></tr>
-            <tr><td>No Stop:</td><td>{} ({:.1}%)</td></tr>
-        </table>
-
-        <h2>Power Comparison</h2>
-        <table>
-            <tr><td>Z-test (fixed):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">ceiling (traditional)</td></tr>
-            <tr><td>e-RT binary:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
-        </table>
-        <table>
-            <tr><td>Domain knowledge value:</td><td>+{:.1}%</td></tr>
-            <tr><td>Sequential cost:</td><td>-{:.1}%</td></tr>
-        </table>
-
-        <h2>Stopping Analysis</h2>
-        <table>
-            <tr><td>Successes (e-RT):</td><td>{}</td></tr>
-            <tr><td>e-RT Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
-            <tr><td>e-RTu Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
-            <tr><td>Type M Error:</td><td>{:.2}x</td></tr>
-        </table>
-
-        {}
-
-        <h2>Visualizations</h2>
-
-        <h3>e-Value Trajectories (Median with 95% CI)</h3>
-        <div id="plot1" style="width:100%;height:500px;"></div>
-
-        <h3>Sample Trajectories (30 runs)</h3>
-        <div id="plot2" style="width:100%;height:500px;"></div>
-
-        <h3>Stopping Times Distribution</h3>
-        <div id="plot3" style="width:100%;height:400px;"></div>
-
-        {}
-    </div>
-
-    <script>
-        // Plot 1: Median + 95% CI
-        Plotly.newPlot('plot1', [
-            {{type:'scatter',mode:'lines',x:{},y:{},line:{{width:0}},showlegend:false}},
-            {{type:'scatter',mode:'lines',x:{},y:{},fill:'tonexty',fillcolor:'rgba(31,119,180,0.3)',line:{{width:0}},showlegend:false}},
-            {{type:'scatter',mode:'lines',x:{},y:{},line:{{color:'blue',width:2.5}},name:'Median'}}
-        ], {{
-            yaxis: {{type:'log',title:'e-value'}},
-            xaxis: {{title:'Patients Enrolled'}},
-            shapes: [
-                {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}},
-                {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',width:1.5,dash:'dot'}}}}
-            ]
-        }});
-
-        // Plot 2: Sample trajectories
-        Plotly.newPlot('plot2', [
-            {}
-            {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Success'}},
-            {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1.5,dash:'dot'}},name:'Futility Watch'}}
-        ], {{
-            yaxis: {{type:'log',title:'e-value'}},
-            xaxis: {{title:'Patients Enrolled'}}
-        }});
-
-        // Plot 3: Stopping times
-        Plotly.newPlot('plot3', [{{
-            type: 'histogram',
-            x: {},
-            marker: {{color: 'green'}},
-            name: 'Success'
-        }}], {{
-            xaxis: {{title: 'Patient Number at Stop'}},
-            yaxis: {{title: 'Count'}}
-        }});
-    </script>
-</body>
-</html>"#,
-        // Header
-        timestamp,
-        // Parameters
-        p_ctrl * 100.0, p_trt * 100.0, design_arr * 100.0, n_patients, n_sims,
-        success_threshold, futility_watch, burn_in, ramp, seed_str,
-        // Operating characteristics
-        type1_error,
-        no_stop_count, (no_stop_count as f64 / n_sims as f64) * 100.0,
-        // Power comparison
-        z_test_power,
-        (success_count as f64 / n_sims as f64) * 100.0,
-        agnostic_power,
-        (success_count as f64 / n_sims as f64) * 100.0 - agnostic_power, // domain knowledge
-        z_test_power - (success_count as f64 / n_sims as f64) * 100.0,   // sequential cost
-        // Stopping analysis
-        success_count,
-        avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0,
-        agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0,
-        type_m_error,
-        // Futility section
-        futility_html,
-        // Required ARR plot
-        required_arr_plot,
-        // Plot 1 data
+<html><head><meta charset="utf-8"><title>e-RT Binary</title>
+<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
+<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
+</head><body>
+<h1>e-RT Binary</h1>
+<pre>
+{}
+Type I: {:.2}%  |  Power: {:.1}%  |  Z-test: {:.1}%  |  e-RTu: {:.1}%
+</pre>
+<div id="p1" style="height:400px"></div>
+<div id="p2" style="height:400px"></div>
+<div id="p3" style="height:300px"></div>
+<script>
+Plotly.newPlot('p1',[
+  {{type:'scatter',x:{},y:{},line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},fill:'tonexty',fillcolor:'rgba(31,119,180,0.3)',line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},line:{{color:'blue',width:2}},name:'Median'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}}]}});
+Plotly.newPlot('p2',[{}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Threshold'}},
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1,dash:'dot'}},name:'Futility'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}}}});
+Plotly.newPlot('p3',[{{type:'histogram',x:{},marker:{{color:'steelblue'}}}}],{{xaxis:{{title:'Stop Time'}},yaxis:{{title:'Count'}}}});
+</script></body></html>"#,
+        timestamp, type1_error, power, z_test_power, agnostic_power,
         x_json, lower_json, x_json, upper_json, x_json, median_json,
-        success_threshold, success_threshold, futility_watch, futility_watch,
-        // Plot 2 data
-        sample_traces,
-        n_patients, success_threshold, success_threshold,
+        success_threshold, success_threshold,
+        sample_traces, n_patients, success_threshold, success_threshold,
         n_patients, futility_watch, futility_watch,
-        // Plot 3 data
         stop_times_json
     )
 }

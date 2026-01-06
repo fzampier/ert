@@ -2,78 +2,11 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::RngCore;
-use std::io::{self, Write};
 use std::fs::File;
+use std::io::{self, Write};
+
+use crate::ert_core::{get_input, get_input_usize, get_bool, get_optional_input, chrono_lite, normal_cdf, normal_quantile};
 use crate::agnostic::{AgnosticERT, Signal, Arm};
-
-// === HELPERS ===
-
-fn get_input(prompt: &str) -> f64 {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<f64>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_input_usize(prompt: &str) -> usize {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<usize>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_bool(prompt: &str) -> bool {
-    loop {
-        print!("{} (y/n): ", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer).unwrap();
-        match buffer.trim().to_lowercase().as_str() {
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            _ => println!("Please type 'y' or 'n'."),
-        }
-    }
-}
-
-fn get_optional_input(prompt: &str) -> Option<u64> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).unwrap();
-    let trimmed = buffer.trim();
-    if trimmed.is_empty() { None } else { trimmed.parse::<u64>().ok() }
-}
-
-fn chrono_lite() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
-}
 
 // === DATA STRUCTURES ===
 
@@ -201,45 +134,6 @@ fn proportional_odds_sample_size(or: f64, power: f64, alpha: f64) -> usize {
     (n.ceil() as usize).max(10)
 }
 
-/// Standard normal CDF approximation (Abramowitz & Stegun)
-fn normal_cdf(x: f64) -> f64 {
-    let a1 =  0.254829592;
-    let a2 = -0.284496736;
-    let a3 =  1.421413741;
-    let a4 = -1.453152027;
-    let a5 =  1.061405429;
-    let p  =  0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs() / 2.0_f64.sqrt();
-
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-
-    0.5 * (1.0 + sign * y)
-}
-
-/// Standard normal quantile approximation (Rational approximation)
-fn normal_quantile(p: f64) -> f64 {
-    if p <= 0.0 { return f64::NEG_INFINITY; }
-    if p >= 1.0 { return f64::INFINITY; }
-    if (p - 0.5).abs() < 1e-10 { return 0.0; }
-
-    // Rational approximation (Abramowitz & Stegun 26.2.23)
-    let p_low = if p < 0.5 { p } else { 1.0 - p };
-    let t = (-2.0 * p_low.ln()).sqrt();
-
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    if p < 0.5 { -z } else { z }
-}
 
 /// Results from proportional odds benchmark
 struct PropOddsBenchmark {
@@ -437,17 +331,19 @@ fn compute_agnostic_multistate(
 struct SimResults {
     type1_error: f64,
     success_count: usize,
-    avg_stop_trans: f64,
-    median_transitions: f64,
+    _avg_stop_trans: f64,
+    _median_transitions: f64,
     trajectories: Vec<Vec<f64>>,
-    stop_times: Vec<f64>,
+    #[allow(dead_code)]
+    _stop_times: Vec<f64>,
     // Type M error tracking
-    avg_effect_at_stop: f64,
-    avg_effect_at_final: f64,
-    type_m_error: f64,
+    _avg_effect_at_stop: f64,
+    _avg_effect_at_final: f64,
+    _type_m_error: f64,
     // Agnostic tracking
     agnostic_successes: usize,
-    agnostic_stop_times: Vec<f64>,
+    #[allow(dead_code)]
+    _agnostic_stop_times: Vec<f64>,
 }
 
 fn run_simulation<R: Rng + ?Sized>(
@@ -512,9 +408,16 @@ fn run_simulation<R: Rng + ?Sized>(
     };
 
     SimResults {
-        type1_error, success_count, avg_stop_trans, median_transitions, trajectories, stop_times,
-        avg_effect_at_stop, avg_effect_at_final, type_m_error,
-        agnostic_successes, agnostic_stop_times,
+        type1_error, success_count,
+        _avg_stop_trans: avg_stop_trans,
+        _median_transitions: median_transitions,
+        trajectories,
+        _stop_times: stop_times,
+        _avg_effect_at_stop: avg_effect_at_stop,
+        _avg_effect_at_final: avg_effect_at_final,
+        _type_m_error: type_m_error,
+        agnostic_successes,
+        _agnostic_stop_times: agnostic_stop_times,
     }
 }
 
@@ -527,153 +430,33 @@ fn compute_day28<R: Rng + ?Sized>(rng: &mut R, p: &TransitionMatrix, n: usize, m
 
 // === HTML REPORT ===
 
-fn build_html(n_patients: usize, n_sims: usize, threshold: f64, null: &SimResults, alt: &SimResults,
-              d28_c: [f64; 4], d28_t: [f64; 4], bench: &PropOddsBenchmark, ert_power: f64,
-              agnostic_power: f64, agnostic_null_rate: f64) -> String {
+fn build_html(_n_patients: usize, _n_sims: usize, threshold: f64, null: &SimResults, alt: &SimResults,
+              _d28_c: [f64; 4], _d28_t: [f64; 4], bench: &PropOddsBenchmark, ert_power: f64,
+              agnostic_power: f64, _agnostic_null_rate: f64) -> String {
 
-    let power_diff = ert_power - bench.power_at_n * 100.0;
-    let verdict = if power_diff.abs() < 2.0 {
-        "Comparable".to_string()
-    } else if power_diff > 0.0 {
-        format!("e-RTms +{:.1}%", power_diff)
-    } else {
-        format!("PO +{:.1}%", -power_diff)
-    };
-
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>e-RTms Report</title>
+    format!(r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>e-RTms Multi-State</title>
 <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-<style>
-body{{font-family:sans-serif;max-width:1100px;margin:0 auto;padding:20px;background:#f8f9fa}}
-h1{{color:#2c3e50}}
-h2{{color:#34495e;border-bottom:2px solid #3498db;padding-bottom:5px;margin-top:30px}}
-table{{border-collapse:collapse;margin:15px 0;background:white;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
-th,td{{padding:10px 16px;border-bottom:1px solid #eee;text-align:left}}
-th{{background:#f1f3f4}}
-.hl{{background:#e8f4f8;font-weight:bold}}
-.comparison{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}}
-.card{{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1)}}
-.card h3{{margin-top:0;color:#2c3e50}}
-.metric{{font-size:2em;font-weight:bold;color:#3498db}}
-.winner{{color:#27ae60}}
-.note{{font-size:0.9em;color:#7f8c8d;margin-top:10px}}
-</style></head><body>
-<h1>e-RTms Multi-State Report</h1>
-<p>Generated: {}</p>
-
-<h2>Model</h2>
-<p>States: Ward, ICU, Home (abs), Dead (abs) | Start: ICU | 28 days</p>
-<p>Good transitions: ICU→Ward, Ward→Home | Bad: all others</p>
-
-<h2>Parameters</h2>
-<table>
-<tr><td>Sample Size (N):</td><td>{}</td></tr>
-<tr><td>Simulations:</td><td>{}</td></tr>
-<tr><td>Threshold (1/α):</td><td>{}</td></tr>
-</table>
-
-<h2>Day 28 Outcomes</h2>
-<table>
-<tr><th></th><th>Ward</th><th>ICU</th><th>Home</th><th>Dead</th></tr>
-<tr><td>Control:</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td></tr>
-<tr><td>Treatment:</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td><td>{:.1}%</td></tr>
-</table>
-
-<h2>Proportional Odds Benchmark</h2>
-<p>Ordinal scale: Dead &lt; ICU &lt; Ward &lt; Home</p>
-<table>
-<tr><td>Proportional OR:</td><td><strong>{:.2}</strong> (treatment benefit)</td></tr>
-<tr><td>Mann-Whitney P(T&gt;C):</td><td>{:.1}%</td></tr>
-<tr><td>PO Power at N={}:</td><td>{:.1}%</td></tr>
-<tr><td>PO N for 80% power:</td><td>{}</td></tr>
-<tr><td>PO N for 90% power:</td><td>{}</td></tr>
-</table>
-
-<h2>Head-to-Head Comparison</h2>
-<div class="comparison">
-<div class="card">
-    <h3>e-RTms (Sequential)</h3>
-    <div class="metric">{:.1}%</div>
-    <p>Power at N={}</p>
-    <p class="note">✓ Allows early stopping<br>✓ Anytime-valid inference<br>✓ Continuous monitoring</p>
-</div>
-<div class="card">
-    <h3>Proportional Odds (Fixed)</h3>
-    <div class="metric">{:.1}%</div>
-    <p>Power at N={}</p>
-    <p class="note">✓ Well-established method<br>✓ Simple interpretation<br>✗ Fixed sample only</p>
-</div>
-</div>
-<table>
-<tr class="hl"><td>Power Difference:</td><td>{}</td></tr>
-<tr><td>e-RTms Type I Error:</td><td>{:.2}%</td></tr>
-<tr><td>Median transitions to stop:</td><td>{:.0}</td></tr>
-<tr><td>Avg stop (when rejected):</td><td>{:.0}</td></tr>
-</table>
-
-<h2>Type M Error (Effect Magnification)</h2>
-<table>
-<tr><td>Effect at stop:</td><td>{:.3}</td></tr>
-<tr><td>Effect at final:</td><td>{:.3}</td></tr>
-<tr class="hl"><td>Type M ratio:</td><td>{:.2}x</td></tr>
-</table>
-
-<h2>Power Comparison (Three-Tier Hierarchy)</h2>
-<table>
-<tr style="background:#e8f8e8;"><td>Prop. Odds (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
-<tr style="background:#fff8e8;"><td>e-RTms (sequential):</td><td><strong>{:.1}%</strong></td><td>← domain-aware sequential</td></tr>
-<tr style="background:#f8e8e8;"><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td>floor (universal)</td></tr>
-<tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTms - e-RTu)</td></tr>
-<tr><td>Sequential cost:</td><td>-{:.1}%</td><td>(PO - e-RTms)</td></tr>
-<tr><td>e-RTu Type I error:</td><td>{:.2}%</td><td></td></tr>
-</table>
-<p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
-
-<h2>e-Value Trajectories</h2>
+<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
+</head><body>
+<h1>e-RTms Multi-State</h1>
+<pre>
+{}
+Type I: {:.2}%  |  Power: {:.1}%  |  Prop Odds: {:.1}%  |  e-RTu: {:.1}%
+</pre>
 <div id="p1" style="height:400px"></div>
 <div id="p2" style="height:400px"></div>
-
 <script>
-var t_null={:?};
-var t_alt={:?};
-var stops={:?};
-var threshold={};
-
+var t_null={:?};var t_alt={:?};var threshold={};
 Plotly.newPlot('p1',t_null.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(150,150,150,0.4)'}},showlegend:false}})),{{
-    yaxis:{{type:'log',title:'e-value',range:[-1, Math.log10(threshold)+1]}},
-    xaxis:{{title:'Transition'}},
-    shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'red',dash:'dash',width:2}}}}],
-    title:'Null Hypothesis (H₀: No Treatment Effect)',
-    annotations:[{{x:1,y:Math.log10(threshold),xref:'paper',yref:'y',text:'α = '+1/threshold,showarrow:false,xanchor:'left'}}]
-}});
-
+  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Transition'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(70,130,180,0.5)'}},showlegend:false}})),{{
-    yaxis:{{type:'log',title:'e-value',range:[-1, Math.log10(threshold)+1]}},
-    xaxis:{{title:'Transition'}},
-    shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'red',dash:'dash',width:2}}}}],
-    title:'Alternative Hypothesis (H₁: Treatment Works)',
-    annotations:[{{x:1,y:Math.log10(threshold),xref:'paper',yref:'y',text:'α = '+1/threshold,showarrow:false,xanchor:'left'}}]
-}});
-</script>
-
-</body></html>"#,
-        chrono_lite(),
-        n_patients, n_sims, threshold,
-        d28_c[0]*100.0, d28_c[1]*100.0, d28_c[2]*100.0, d28_c[3]*100.0,
-        d28_t[0]*100.0, d28_t[1]*100.0, d28_t[2]*100.0, d28_t[3]*100.0,
-        bench.or, bench.mann_whitney * 100.0, n_patients, bench.power_at_n * 100.0,
-        bench.n_for_80, bench.n_for_90,
-        ert_power, n_patients,
-        bench.power_at_n * 100.0, n_patients,
-        verdict, null.type1_error, alt.median_transitions, alt.avg_stop_trans,
-        alt.avg_effect_at_stop, alt.avg_effect_at_final, alt.type_m_error,
-        // Power comparison section
-        bench.power_at_n * 100.0,  // PO ceiling
-        ert_power,                  // e-RTms middle
-        agnostic_power,             // Agnostic floor
-        ert_power - agnostic_power, // Domain knowledge value
-        bench.power_at_n * 100.0 - ert_power, // Sequential cost
-        agnostic_null_rate,         // Agnostic Type I
-        null.trajectories, alt.trajectories, alt.stop_times, threshold)
+  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Transition'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
+</script></body></html>"#,
+        chrono_lite(), null.type1_error, ert_power, bench.power_at_n * 100.0, agnostic_power,
+        null.trajectories, alt.trajectories, threshold)
 }
 
 // === MAIN ===
@@ -760,16 +543,16 @@ pub fn run() {
 
     // Type M error
     println!("\n--- Type M Error (Magnification) ---");
-    println!("Effect at stop:  {:.3}", alt.avg_effect_at_stop);
-    println!("Effect at final: {:.3}", alt.avg_effect_at_final);
-    println!("Type M ratio:    {:.2}x", alt.type_m_error);
+    println!("Effect at stop:  {:.3}", alt._avg_effect_at_stop);
+    println!("Effect at final: {:.3}", alt._avg_effect_at_final);
+    println!("Type M ratio:    {:.2}x", alt._type_m_error);
 
     let html = build_html(n_patients, n_sims, threshold, &null, &alt, d28_c, d28_t, &benchmark, ert_power, agnostic_power, agnostic_null_rate);
     File::create("multistate_report.html").unwrap().write_all(html.as_bytes()).unwrap();
     println!("\n>> Saved: multistate_report.html");
 }
 
-/// Rough estimate of N needed for target power (binary search)
+#[allow(dead_code)]
 fn estimate_n_for_power<R: Rng + ?Sized>(
     _rng: &mut R, target: f64, _p_ctrl: &TransitionMatrix, _p_trt: &TransitionMatrix,
     _max_days: usize, _start: usize, _burn_in: usize, _ramp: usize, _threshold: f64, current_n: usize,

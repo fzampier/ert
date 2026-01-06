@@ -8,63 +8,10 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::RngCore;
-use std::io::{self, Write};
 use std::fs::File;
+use std::io::{self, Write};
 
-// === HELPERS ===
-
-fn get_input(prompt: &str) -> f64 {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<f64>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_input_usize(prompt: &str) -> usize {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<usize>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_optional_input(prompt: &str) -> Option<u64> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).unwrap();
-    let trimmed = buffer.trim();
-    if trimmed.is_empty() { None } else { trimmed.parse::<u64>().ok() }
-}
-
-fn chrono_lite() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
-}
+use crate::ert_core::{get_input, get_input_usize, get_optional_input, chrono_lite};
 
 // === CORE: THE UNIVERSAL SIGNAL ===
 
@@ -80,6 +27,7 @@ pub struct Signal {
     pub good: bool,
 }
 
+#[allow(dead_code)]
 impl Signal {
     pub fn new(arm: Arm, good: bool) -> Self {
         Signal { arm, good }
@@ -207,26 +155,20 @@ impl AgnosticERT {
     }
 
     // Getters
-    pub fn wealth(&self) -> f64 {
-        self.wealth
-    }
-    pub fn stopped(&self) -> bool {
-        self.stopped
-    }
-    pub fn stopped_at(&self) -> Option<usize> {
-        self.stopped_at
-    }
-    pub fn history(&self) -> &[f64] {
-        &self.wealth_history
-    }
-    pub fn effect_history(&self) -> &[f64] {
-        &self.effect_history
-    }
+    #[allow(dead_code)]
+    pub fn wealth(&self) -> f64 { self.wealth }
+    pub fn stopped(&self) -> bool { self.stopped }
+    pub fn stopped_at(&self) -> Option<usize> { self.stopped_at }
+    pub fn history(&self) -> &[f64] { &self.wealth_history }
+    #[allow(dead_code)]
+    pub fn effect_history(&self) -> &[f64] { &self.effect_history }
+    #[allow(dead_code)]
     pub fn rates(&self) -> (f64, f64) {
         let r_t = if self.n_trt > 0.0 { self.good_trt / self.n_trt } else { 0.0 };
         let r_c = if self.n_ctrl > 0.0 { self.good_ctrl / self.n_ctrl } else { 0.0 };
         (r_t, r_c)
     }
+    #[allow(dead_code)]
     pub fn counts(&self) -> (f64, f64, f64, f64) {
         (self.n_trt, self.good_trt, self.n_ctrl, self.good_ctrl)
     }
@@ -242,13 +184,13 @@ impl AgnosticERT {
 
 struct SimResults {
     rejection_rate: f64,
-    avg_stop: f64,
-    median_signals: f64,
+    _avg_stop: f64,
+    _median_signals: f64,
     trajectories: Vec<Vec<f64>>,
     // Type M
-    avg_effect_at_stop: f64,
-    avg_effect_at_final: f64,
-    type_m: f64,
+    _avg_effect_at_stop: f64,
+    _avg_effect_at_final: f64,
+    _type_m: f64,
 }
 
 // === DEMONSTRATION: BINARY SIGNAL GENERATOR ===
@@ -342,115 +284,50 @@ fn run_simulation<R: Rng + ?Sized>(
 
     SimResults {
         rejection_rate,
-        avg_stop,
-        median_signals,
+        _avg_stop: avg_stop,
+        _median_signals: median_signals,
         trajectories,
-        avg_effect_at_stop,
-        avg_effect_at_final,
-        type_m,
+        _avg_effect_at_stop: avg_effect_at_stop,
+        _avg_effect_at_final: avg_effect_at_final,
+        _type_m: type_m,
     }
 }
 
 // === HTML REPORT ===
 
 fn build_html(
-    n_signals: usize,
-    n_sims: usize,
+    _n_signals: usize,
+    _n_sims: usize,
     threshold: f64,
-    p_trt: f64,
-    p_ctrl: f64,
+    _p_trt: f64,
+    _p_ctrl: f64,
     null: &SimResults,
     alt: &SimResults,
 ) -> String {
     format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>e-RTu Report</title>
+        r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>e-RTu Universal</title>
 <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-<style>
-body{{font-family:sans-serif;max-width:1000px;margin:0 auto;padding:20px;background:#f8f9fa}}
-h1{{color:#2c3e50}}
-h2{{color:#34495e;border-bottom:2px solid #9b59b6;padding-bottom:5px;margin-top:30px}}
-table{{border-collapse:collapse;margin:15px 0;background:white;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
-th,td{{padding:10px 16px;border-bottom:1px solid #eee;text-align:left}}
-.hl{{background:#f3e8ff;font-weight:bold}}
-.note{{font-size:0.9em;color:#7f8c8d;margin-top:10px}}
-</style></head><body>
-<h1>e-RTu Report</h1>
-<p>Universal Sequential Test</p>
-<p>Generated: {}</p>
-
-<h2>Design</h2>
-<table>
-<tr><td>Signals per trial:</td><td>{}</td></tr>
-<tr><td>Simulations:</td><td>{}</td></tr>
-<tr><td>Threshold (1/α):</td><td>{}</td></tr>
-<tr><td>Burn-in:</td><td>50</td></tr>
-<tr><td>Ramp:</td><td>100</td></tr>
-</table>
-
-<h2>Signal Generator (Demo: Binary)</h2>
-<table>
-<tr><td>P(good | treatment):</td><td>{:.1}%</td></tr>
-<tr><td>P(good | control):</td><td>{:.1}%</td></tr>
-<tr><td>True effect (δ):</td><td>{:.1}%</td></tr>
-</table>
-
-<h2>Results</h2>
-<table>
-<tr class="hl"><td>Type I Error:</td><td>{:.2}%</td></tr>
-<tr class="hl"><td>Power:</td><td>{:.1}%</td></tr>
-<tr><td>Median signals:</td><td>{:.0}</td></tr>
-<tr><td>Avg stop (when rejected):</td><td>{:.0}</td></tr>
-</table>
-
-<h2>Type M Error</h2>
-<table>
-<tr><td>Effect at stop:</td><td>{:.3}</td></tr>
-<tr><td>Effect at final:</td><td>{:.3}</td></tr>
-<tr class="hl"><td>Type M ratio:</td><td>{:.2}x</td></tr>
-</table>
-
-<h2>e-Value Trajectories</h2>
+<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
+</head><body>
+<h1>e-RTu Universal</h1>
+<pre>
+{}
+Type I: {:.2}%  |  Power: {:.1}%
+</pre>
 <div id="p1" style="height:400px"></div>
 <div id="p2" style="height:400px"></div>
-
 <script>
-var t_null={:?};
-var t_alt={:?};
-var threshold={};
-
+var t_null={:?};var t_alt={:?};var threshold={};
 Plotly.newPlot('p1',t_null.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(150,150,150,0.4)'}},showlegend:false}})),{{
-    yaxis:{{type:'log',title:'e-value',range:[-1, Math.log10(threshold)+1]}},
-    xaxis:{{title:'Signal'}},
-    shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'red',dash:'dash',width:2}}}}],
-    title:'Null (no effect)'
-}});
-
+  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(155,89,182,0.5)'}},showlegend:false}})),{{
-    yaxis:{{type:'log',title:'e-value',range:[-1, Math.log10(threshold)+1]}},
-    xaxis:{{title:'Signal'}},
-    shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'red',dash:'dash',width:2}}}}],
-    title:'Alternative (treatment works)'
-}});
-</script>
-
-</body></html>"#,
-        chrono_lite(),
-        n_signals,
-        n_sims,
-        threshold,
-        p_trt * 100.0,
-        p_ctrl * 100.0,
-        (p_trt - p_ctrl) * 100.0,
-        null.rejection_rate * 100.0,
-        alt.rejection_rate * 100.0,
-        alt.median_signals,
-        alt.avg_stop,
-        alt.avg_effect_at_stop,
-        alt.avg_effect_at_final,
-        alt.type_m,
-        null.trajectories,
-        alt.trajectories,
-        threshold,
+  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
+</script></body></html>"#,
+        chrono_lite(), null.rejection_rate * 100.0, alt.rejection_rate * 100.0,
+        null.trajectories, alt.trajectories, threshold,
     )
 }
 
@@ -494,9 +371,9 @@ pub fn run() {
     println!("Power: {:.1}%", alt.rejection_rate * 100.0);
 
     println!("\n--- Type M Error ---");
-    println!("Effect at stop:  {:.3}", alt.avg_effect_at_stop);
-    println!("Effect at final: {:.3}", alt.avg_effect_at_final);
-    println!("Type M ratio:    {:.2}x", alt.type_m);
+    println!("Effect at stop:  {:.3}", alt._avg_effect_at_stop);
+    println!("Effect at final: {:.3}", alt._avg_effect_at_final);
+    println!("Type M ratio:    {:.2}x", alt._type_m);
 
     let html = build_html(n_signals, n_sims, threshold, p_trt, p_ctrl, &null, &alt);
     File::create("agnostic_report.html")

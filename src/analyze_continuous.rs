@@ -1168,18 +1168,11 @@ fn build_html_report(
     <title>Continuous e-RT Analysis Report</title>
     <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; margin-top: 30px; }}
-        h3 {{ color: #7f8c8d; }}
-        table {{ border-collapse: collapse; margin: 15px 0; }}
-        td {{ padding: 8px 16px; border-bottom: 1px solid #eee; }}
-        td:first-child {{ color: #7f8c8d; }}
-        .highlight {{ background: #e8f4f8; font-weight: bold; }}
-        .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
-        em {{ color: #95a5a6; }}
+        body {{ font-family: monospace; max-width: 1200px; margin: 0 auto; padding: 20px; background: #fff; }}
+        h2 {{ border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 20px; }}
+        table {{ border-collapse: collapse; margin: 10px 0; }}
+        td {{ padding: 4px 12px; }}
+        .highlight {{ font-weight: bold; }}
     </style>
 </head>
 <body>

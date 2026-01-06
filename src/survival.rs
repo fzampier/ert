@@ -2,123 +2,27 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::RngCore;
-use std::io::{self, Write};
 use std::fs::File;
+use std::io::{self, Write};
 
+use crate::ert_core::{get_input, get_input_usize, get_bool, get_optional_input, chrono_lite, normal_cdf};
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
-// === HELPERS ===
-
-fn get_input(prompt: &str) -> f64 {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<f64>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_input_usize(prompt: &str) -> usize {
-    loop {
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(_) => match buffer.trim().parse::<usize>() {
-                Ok(num) => return num,
-                Err(_) => println!("Invalid number."),
-            },
-            Err(_) => println!("Error."),
-        }
-    }
-}
-
-fn get_bool(prompt: &str) -> bool {
-    loop {
-        print!("{} (y/n): ", prompt);
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer).unwrap();
-        match buffer.trim().to_lowercase().as_str() {
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            _ => println!("Please type 'y' or 'n'."),
-        }
-    }
-}
-
-fn get_optional_input(prompt: &str) -> Option<u64> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).unwrap();
-    let trimmed = buffer.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        trimmed.parse::<u64>().ok()
-    }
-}
-
-fn chrono_lite() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
-}
+// === SURVIVAL-SPECIFIC HELPERS ===
 
 fn calculate_n_survival(target_hr: f64, power: f64) -> usize {
     let z_alpha: f64 = 1.96;
     let z_beta: f64 = if power > 0.85 { 1.28 } else { 0.84 };
     let log_hr = target_hr.ln();
-    let req_events = (4.0 * ((z_alpha + z_beta) / log_hr).powi(2)).ceil() as usize;
-    req_events
+    (4.0 * ((z_alpha + z_beta) / log_hr).powi(2)).ceil() as usize
 }
 
 /// Calculate log-rank test power given number of events
-/// Uses Schoenfeld's formula: Power = Φ(|log(HR)| × √(d/4) - z_α)
 fn log_rank_power(target_hr: f64, n_events: usize, alpha: f64) -> f64 {
-    let z_alpha = z_from_alpha(alpha);
+    let z_alpha = if (alpha - 0.05).abs() < 0.001 { 1.96 } else { 2.576 };
     let log_hr = target_hr.ln().abs();
     let z_effect = log_hr * (n_events as f64 / 4.0).sqrt();
     normal_cdf(z_effect - z_alpha)
-}
-
-fn normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
-}
-
-fn erf(x: f64) -> f64 {
-    let a1 =  0.254829592;
-    let a2 = -0.284496736;
-    let a3 =  1.421413741;
-    let a4 = -1.453152027;
-    let a5 =  1.061405429;
-    let p  =  0.3275911;
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-    sign * y
-}
-
-fn z_from_alpha(alpha: f64) -> f64 {
-    if (alpha - 0.05).abs() < 0.001 { return 1.96; }
-    if (alpha - 0.01).abs() < 0.001 { return 2.576; }
-    1.96 // default
 }
 
 // === DATA STRUCTURES ===
@@ -653,19 +557,19 @@ pub fn run() {
 }
 
 fn build_html_report(
-    target_hr: f64, n_patients: usize, n_sims: usize,
+    _target_hr: f64, _n_patients: usize, n_sims: usize,
     success_threshold: f64, futility_watch: f64,
-    shape: f64, scale: f64, cens_prop: f64,
-    burn_in: usize, ramp: usize, lambda_max: f64,
-    seed: Option<u64>, run_futility: bool,
-    type1_error: f64, success_count: usize, no_stop_count: usize,
-    avg_stop_event: f64, avg_hr_stop: f64, avg_hr_final: f64, type_m_error: f64,
-    futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
-    trajectories: &[Vec<f64>], stop_events: &[f64], required_hrs: &[f64],
-    log_rank_power: f64, agnostic_power: f64, agnostic_avg_stop: f64,
+    _shape: f64, _scale: f64, _cens_prop: f64,
+    _burn_in: usize, _ramp: usize, _lambda_max: f64,
+    _seed: Option<u64>, _run_futility: bool,
+    type1_error: f64, success_count: usize, _no_stop_count: usize,
+    _avg_stop_event: f64, _avg_hr_stop: f64, _avg_hr_final: f64, _type_m_error: f64,
+    _futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
+    trajectories: &[Vec<f64>], stop_events: &[f64], _required_hrs: &[f64],
+    log_rank_power: f64, agnostic_power: f64, _agnostic_avg_stop: f64,
 ) -> String {
     let timestamp = chrono_lite();
-    let seed_str = seed.map_or("random".to_string(), |s| s.to_string());
+    let power = (success_count as f64 / n_sims as f64) * 100.0;
 
     let max_len = trajectories.iter().map(|t| t.len()).max().unwrap_or(0);
     let mut x_axis: Vec<usize> = Vec::new();
@@ -691,7 +595,6 @@ fn build_html_report(
     let low_json = format!("{:?}", y_lower);
     let up_json = format!("{:?}", y_upper);
     let stops_json = format!("{:?}", stop_events);
-    let req_hrs_json = format!("{:?}", required_hrs);
 
     let mut sample_traces = String::new();
     for idx in 0..30.min(trajectories.len()) {
@@ -705,204 +608,35 @@ fn build_html_report(
         ));
     }
 
-    let futility_html = if run_futility {
-        if let Some((n_trig, med_event, med_hr, q25, q50, q75, trig_success)) = futility_stats {
-            format!(r#"
-        <h2>Futility Analysis</h2>
-        <table>
-            <tr><td>Trials triggering (wealth &lt; {:.1}):</td><td><strong>{} ({:.1}%)</strong></td></tr>
-            <tr><td>Median event at trigger:</td><td>{:.0} ({:.0}% of N)</td></tr>
-            <tr><td>Median required HR:</td><td>{:.3}</td></tr>
-            <tr><td>Design HR:</td><td>{:.3}</td></tr>
-            <tr><td>Ratio (Required/Design) - 25th pctl:</td><td>{:.2}x</td></tr>
-            <tr><td>Ratio (Required/Design) - Median:</td><td>{:.2}x</td></tr>
-            <tr><td>Ratio (Required/Design) - 75th pctl:</td><td>{:.2}x</td></tr>
-            <tr><td>Triggered trials that succeeded:</td><td>{} ({:.1}%)</td></tr>
-        </table>
-            "#,
-                futility_watch, n_trig, (n_trig as f64 / n_sims as f64) * 100.0,
-                med_event, (med_event / n_patients as f64) * 100.0,
-                med_hr, target_hr,
-                q25, q50, q75,
-                trig_success, (trig_success as f64 / n_trig as f64) * 100.0)
-        } else {
-            "<h2>Futility Analysis</h2><p>No trials triggered futility watch.</p>".to_string()
-        }
-    } else {
-        String::new()
-    };
-
-    let req_hr_plot = if run_futility && !required_hrs.is_empty() {
-        format!(r#"
-        <h3>Required HR Distribution (at Futility Trigger)</h3>
-        <div id="plot4" style="width:100%;height:350px;"></div>
-        <script>
-            Plotly.newPlot('plot4', [{{
-                type: 'histogram',
-                x: {},
-                marker: {{color: 'steelblue'}}
-            }}], {{
-                shapes: [{{type:'line',x0:{:.3},x1:{:.3},y0:0,y1:1,yref:'paper',line:{{color:'red',width:2,dash:'dash'}}}}],
-                xaxis: {{title: 'Required HR'}},
-                yaxis: {{title: 'Count'}},
-                annotations: [{{x:{:.3},y:1,yref:'paper',text:'Design HR',showarrow:false,font:{{color:'red'}}}}]
-            }});
-        </script>
-        "#, req_hrs_json, target_hr, target_hr, target_hr)
-    } else {
-        String::new()
-    };
-
     format!(r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>e-Survival Simulation Report</title>
-    <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; margin-top: 30px; }}
-        h3 {{ color: #7f8c8d; }}
-        table {{ border-collapse: collapse; margin: 15px 0; }}
-        td {{ padding: 8px 16px; border-bottom: 1px solid #eee; }}
-        td:first-child {{ color: #7f8c8d; }}
-        .highlight {{ background: #e8f4f8; font-weight: bold; }}
-        .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
-        pre {{ background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>e-Survival Simulation Report</h1>
-        <p class="timestamp">Generated: {}</p>
-        
-        <h2>Parameters</h2>
-        <table>
-            <tr><td>Target HR:</td><td><strong>{:.2}</strong></td></tr>
-            <tr><td>Sample Size (N):</td><td>{}</td></tr>
-            <tr><td>Simulations:</td><td>{}</td></tr>
-            <tr><td>Success Threshold (1/α):</td><td>{}</td></tr>
-            <tr><td>Futility Watch:</td><td>{}</td></tr>
-            <tr><td>Weibull Shape:</td><td>{}</td></tr>
-            <tr><td>Weibull Scale:</td><td>{}</td></tr>
-            <tr><td>Censoring:</td><td>{:.1}%</td></tr>
-            <tr><td>burn_in:</td><td>{}</td></tr>
-            <tr><td>ramp:</td><td>{}</td></tr>
-            <tr><td>lambda_max:</td><td>{}</td></tr>
-            <tr><td>Seed:</td><td>{}</td></tr>
-        </table>
-
-        <h2>Equations</h2>
-        <pre>
-pⱼ = Y₁(tⱼ) / (Y₁(tⱼ) + Y₀(tⱼ))       # null probability (risk set proportion)
-Uⱼ = Xⱼ - pⱼ                           # score (observed - expected)
-Zⱼ = Σ Uₖ                              # cumulative score
-λⱼ = sign(Zⱼ₋₁) × c × λmax            # betting fraction
-Wⱼ = Wⱼ₋₁ × (1 + λⱼ × Uⱼ)             # wealth update (events only)
-        </pre>
-
-        <h2>Operating Characteristics</h2>
-        <table>
-            <tr class="highlight"><td>Type I Error:</td><td>{:.2}%</td></tr>
-            <tr class="highlight"><td>Power (Success Rate):</td><td>{:.1}%</td></tr>
-            <tr><td>No Stop:</td><td>{} ({:.1}%)</td></tr>
-        </table>
-
-        <h2>Power Comparison (Three-Tier Hierarchy)</h2>
-        <table>
-            <tr style="background:#e8f8e8;"><td>Log-rank (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
-            <tr style="background:#fff8e8;"><td>e-RTs (sequential):</td><td><strong>{:.1}%</strong></td><td>domain-aware sequential</td></tr>
-            <tr style="background:#f8e8e8;"><td>e-RTu (universal):</td><td><strong>{:.1}%</strong></td><td>floor (universal)</td></tr>
-            <tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTs - e-RTu)</td></tr>
-            <tr><td>Sequential cost:</td><td>-{:.1}%</td><td>(log-rank - e-RTs)</td></tr>
-        </table>
-        <p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
-
-        <h2>Success Analysis</h2>
-        <table>
-            <tr><td>Number of Successes:</td><td>{}</td></tr>
-            <tr><td>Average Stopping Point:</td><td>{:.0} events ({:.0}% of N)</td></tr>
-            <tr><td>HR at Stop:</td><td>{:.3}</td></tr>
-            <tr><td>HR at End:</td><td>{:.3}</td></tr>
-            <tr><td>Type M Error (Magnification):</td><td>{:.2}x</td></tr>
-        </table>
-
-        {}
-
-        <h2>Visualizations</h2>
-        
-        <h3>e-Value Trajectories (Median with 95% CI)</h3>
-        <div id="plot1" style="width:100%;height:450px;"></div>
-        
-        <h3>Sample Trajectories (30 runs)</h3>
-        <div id="plot2" style="width:100%;height:450px;"></div>
-        
-        <h3>Stopping Events Distribution</h3>
-        <div id="plot3" style="width:100%;height:350px;"></div>
-        
-        {}
-    </div>
-
-    <script>
-        // Plot 1: Median + 95% CI
-        Plotly.newPlot('plot1', [
-            {{type:'scatter',mode:'lines',x:{},y:{},line:{{width:0}},showlegend:false}},
-            {{type:'scatter',mode:'lines',x:{},y:{},fill:'tonexty',fillcolor:'rgba(0,100,0,0.3)',line:{{width:0}},showlegend:false}},
-            {{type:'scatter',mode:'lines',x:{},y:{},line:{{color:'darkgreen',width:2.5}},name:'Median'}}
-        ], {{
-            yaxis: {{type:'log',title:'e-value'}},
-            xaxis: {{title:'Number of Events'}},
-            shapes: [
-                {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'red',width:2,dash:'dash'}}}},
-                {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',width:1.5,dash:'dot'}}}}
-            ]
-        }});
-
-        // Plot 2: Sample trajectories
-        Plotly.newPlot('plot2', [
-            {}
-            {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'red',width:2,dash:'dash'}},name:'Success'}},
-            {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1.5,dash:'dot'}},name:'Futility Watch'}}
-        ], {{
-            yaxis: {{type:'log',title:'e-value'}},
-            xaxis: {{title:'Number of Events'}}
-        }});
-
-        // Plot 3: Stopping events
-        Plotly.newPlot('plot3', [{{
-            type: 'histogram',
-            x: {},
-            marker: {{color: 'darkgreen'}}
-        }}], {{
-            xaxis: {{title: 'Event Number at Stop'}},
-            yaxis: {{title: 'Count'}}
-        }});
-    </script>
-</body>
-</html>"#,
-        timestamp,
-        target_hr, n_patients, n_sims,
-        success_threshold, futility_watch,
-        shape, scale, cens_prop * 100.0,
-        burn_in, ramp, lambda_max, seed_str,
-        type1_error, (success_count as f64 / n_sims as f64) * 100.0,
-        no_stop_count, (no_stop_count as f64 / n_sims as f64) * 100.0,
-        // Power comparison section
-        log_rank_power * 100.0,
-        (success_count as f64 / n_sims as f64) * 100.0, // e-survival power
-        agnostic_power,
-        (success_count as f64 / n_sims as f64) * 100.0 - agnostic_power, // domain knowledge value
-        log_rank_power * 100.0 - (success_count as f64 / n_sims as f64) * 100.0, // sequential cost
-        success_count,
-        avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0,
-        avg_hr_stop, avg_hr_final, type_m_error,
-        futility_html,
-        req_hr_plot,
+<html><head><meta charset="utf-8"><title>e-RTs Survival</title>
+<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
+<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
+</head><body>
+<h1>e-RTs Survival</h1>
+<pre>
+{}
+Type I: {:.2}%  |  Power: {:.1}%  |  Log-rank: {:.1}%  |  e-RTu: {:.1}%
+</pre>
+<div id="p1" style="height:400px"></div>
+<div id="p2" style="height:400px"></div>
+<div id="p3" style="height:300px"></div>
+<script>
+Plotly.newPlot('p1',[
+  {{type:'scatter',x:{},y:{},line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},fill:'tonexty',fillcolor:'rgba(0,100,0,0.3)',line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},line:{{color:'darkgreen',width:2}},name:'Median'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Events'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}}]}});
+Plotly.newPlot('p2',[{}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Threshold'}},
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1,dash:'dot'}},name:'Futility'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Events'}}}});
+Plotly.newPlot('p3',[{{type:'histogram',x:{},marker:{{color:'steelblue'}}}}],{{xaxis:{{title:'Stop Event'}},yaxis:{{title:'Count'}}}});
+</script></body></html>"#,
+        timestamp, type1_error, power, log_rank_power * 100.0, agnostic_power,
         x_json, low_json, x_json, up_json, x_json, med_json,
-        success_threshold, success_threshold, futility_watch, futility_watch,
+        success_threshold, success_threshold,
         sample_traces, max_len, success_threshold, success_threshold,
         max_len, futility_watch, futility_watch,
         stops_json

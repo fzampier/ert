@@ -38,17 +38,18 @@ struct MethodResults {
     _method: Method,
     type1_error: f64,
     success_count: usize,
-    no_stop_count: usize,
-    avg_stop_n: f64,
-    avg_effect_stop: f64,
-    avg_effect_final: f64,
-    type_m_error: f64,
-    futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
+    _no_stop_count: usize,
+    _avg_stop_n: f64,
+    _avg_effect_stop: f64,
+    _avg_effect_final: f64,
+    _type_m_error: f64,
+    _futility_stats: Option<(usize, f64, f64, f64, f64, f64, usize)>,
     trajectories: Vec<Vec<f64>>,
     stop_times: Vec<f64>,
-    required_effects: Vec<f64>,
+    _required_effects: Vec<f64>,
     // Agnostic comparison
     agnostic_power: f64,
+    #[allow(dead_code)]
     agnostic_avg_stop: f64,
 }
 
@@ -573,15 +574,15 @@ fn run_simulation<R: Rng + ?Sized>(
         _method: method,
         type1_error,
         success_count,
-        no_stop_count,
-        avg_stop_n,
-        avg_effect_stop,
-        avg_effect_final,
-        type_m_error,
-        futility_stats,
+        _no_stop_count: no_stop_count,
+        _avg_stop_n: avg_stop_n,
+        _avg_effect_stop: avg_effect_stop,
+        _avg_effect_final: avg_effect_final,
+        _type_m_error: type_m_error,
+        _futility_stats: futility_stats,
         trajectories,
         stop_times,
-        required_effects,
+        _required_effects: required_effects,
         agnostic_power,
         agnostic_avg_stop,
     }
@@ -590,259 +591,55 @@ fn run_simulation<R: Rng + ?Sized>(
 // === HTML REPORT ===
 
 fn build_html_report(
-    method_choice: usize,
-    mu_ctrl: f64, mu_trt: f64, sd: f64,
-    min_val: Option<f64>, max_val: Option<f64>,
-    design_effect_linear: Option<f64>, design_effect_mad: Option<f64>,
+    _method_choice: usize,
+    _mu_ctrl: f64, _mu_trt: f64, _sd: f64,
+    _min_val: Option<f64>, _max_val: Option<f64>,
+    _design_effect_linear: Option<f64>, _design_effect_mad: Option<f64>,
     n_patients: usize, n_sims: usize,
     success_threshold: f64, futility_watch: f64,
-    burn_in: usize, ramp: usize, c_max: f64,
-    seed: Option<u64>, run_futility: bool,
+    _burn_in: usize, _ramp: usize, _c_max: f64,
+    _seed: Option<u64>, _run_futility: bool,
     t_test_power: f64,
     linear_results: Option<&MethodResults>,
     mad_results: Option<&MethodResults>,
 ) -> String {
     let timestamp = chrono_lite();
-    let seed_str = seed.map_or("random".to_string(), |s| s.to_string());
 
-    let method_str = match method_choice {
-        1 => "e-RTo",
-        2 => "e-RTc",
-        _ => "e-RTo + e-RTc",
-    };
-
-    // Build method sections
-    let mut method_sections = String::new();
-
-    if let Some(res) = linear_results {
-        let effect_label = "Mean Difference";
-        let design_eff = design_effect_linear.unwrap_or(0.0);
-        method_sections.push_str(&build_method_section(
-            "e-RTo", effect_label, res, design_eff, n_patients, n_sims,
-            min_val, max_val, run_futility, futility_watch, 1
-        ));
-    }
-
-    if let Some(res) = mad_results {
-        let effect_label = "Cohen's d";
-        let design_eff = design_effect_mad.unwrap_or(0.0);
-        method_sections.push_str(&build_method_section(
-            "e-RTc", effect_label, res, design_eff, n_patients, n_sims,
-            None, None, run_futility, futility_watch, 2
-        ));
-    }
-
-    // Equations
-    let linear_eq = r#"
-    <h3>e-RTo Equations</h3>
-    <pre>
-x = (Y - min) / (max - min)           # normalize to [0,1]
-scalar = 2x - 1                        # map to [-1,1]
-δ̂ = (mean_trt - mean_ctrl) / range    # normalized effect estimate
-λ = 0.5 + 0.5 × c × δ̂ × scalar        # betting fraction
-    </pre>"#;
-
-    let mad_eq = r#"
-    <h3>e-RTc Equations</h3>
-    <pre>
-m = median(Y₁, ..., Y_{i-1})           # robust center
-s = MAD(Y₁, ..., Y_{i-1})              # robust scale
-r = (Yᵢ - m) / s                       # standardized residual
-g = r / (1 + |r|)                      # squash to (-1,1)
-direction = sign(mean_trt - mean_ctrl) # from past data
-λ = 0.5 + c × c_max × g × direction   # betting fraction
-    </pre>"#;
-
-    let equations = match method_choice {
-        1 => linear_eq.to_string(),
-        2 => mad_eq.to_string(),
-        _ => format!("{}{}", linear_eq, mad_eq),
-    };
-
-    let bounds_row = if let (Some(mn), Some(mx)) = (min_val, max_val) {
-        format!("<tr><td>Bounds (min, max):</td><td>{}, {}</td></tr>", mn, mx)
-    } else { String::new() };
-
-    // Build power comparison section
-    let mut power_comparison = format!(r#"
-        <h2>Power Comparison</h2>
-        <table>
-            <tr><td>t-test (fixed):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">ceiling (traditional)</td></tr>
-    "#, t_test_power);
+    let mut summary = format!("{}\nType I: ", timestamp);
+    let mut plots = String::new();
 
     if let Some(res) = linear_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
-        power_comparison.push_str(&format!(
-            r#"<tr><td>e-RTo:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
-        "#, power, res.agnostic_power));
+        summary.push_str(&format!("{:.2}%  |  e-RTo: {:.1}%  |  t-test: {:.1}%  |  e-RTu: {:.1}%",
+            res.type1_error, power, t_test_power, res.agnostic_power));
+        plots.push_str(&build_plots("e-RTo", res, n_patients, n_sims, success_threshold, futility_watch, 1));
     }
 
     if let Some(res) = mad_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
-        power_comparison.push_str(&format!(
-            r#"<tr><td>e-RTc:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
-        "#, power, res.agnostic_power));
+        if linear_results.is_some() {
+            summary.push_str(&format!("\n         {:.2}%  |  e-RTc: {:.1}%  |  e-RTu: {:.1}%",
+                res.type1_error, power, res.agnostic_power));
+        } else {
+            summary.push_str(&format!("{:.2}%  |  e-RTc: {:.1}%  |  t-test: {:.1}%  |  e-RTu: {:.1}%",
+                res.type1_error, power, t_test_power, res.agnostic_power));
+        }
+        plots.push_str(&build_plots("e-RTc", res, n_patients, n_sims, success_threshold, futility_watch, 2));
     }
-
-    power_comparison.push_str("</table>");
-
-    // Add domain knowledge value
-    if let Some(res) = linear_results {
-        let power = (res.success_count as f64 / n_sims as f64) * 100.0;
-        power_comparison.push_str(&format!(r#"
-        <table>
-            <tr><td>e-RTo domain knowledge:</td><td>+{:.1}%</td></tr>
-            <tr><td>e-RTo sequential cost:</td><td>-{:.1}%</td></tr>
-        </table>
-        "#, power - res.agnostic_power, t_test_power - power));
-    }
-
-    let design_effect_row = match method_choice {
-        1 => format!("<tr><td>Design Effect (Mean Diff):</td><td><strong>{:.2}</strong></td></tr>", design_effect_linear.unwrap_or(0.0)),
-        2 => format!("<tr><td>Design Effect (Cohen's d):</td><td><strong>{:.2}</strong></td></tr>", design_effect_mad.unwrap_or(0.0)),
-        _ => format!(
-            "<tr><td>Design Effect (Mean Diff):</td><td><strong>{:.2}</strong></td></tr><tr><td>Design Effect (Cohen's d):</td><td><strong>{:.2}</strong></td></tr>",
-            design_effect_linear.unwrap_or(0.0), design_effect_mad.unwrap_or(0.0)
-        ),
-    };
 
     format!(r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Continuous e-RT Simulation Report</title>
-    <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .container {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; margin-top: 30px; border-bottom: 2px solid #bdc3c7; padding-bottom: 5px; }}
-        h3 {{ color: #7f8c8d; }}
-        table {{ border-collapse: collapse; margin: 15px 0; }}
-        td {{ padding: 8px 16px; border-bottom: 1px solid #eee; }}
-        td:first-child {{ color: #7f8c8d; }}
-        .highlight {{ background: #e8f4f8; font-weight: bold; }}
-        .timestamp {{ color: #95a5a6; font-size: 0.9em; }}
-        pre {{ background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto; }}
-        .method-section {{ border-left: 4px solid #3498db; padding-left: 20px; margin: 20px 0; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Continuous e-RT Simulation Report</h1>
-        <p class="timestamp">Generated: {}</p>
-
-        <h2>Parameters</h2>
-        <table>
-            <tr><td>Method:</td><td><strong>{}</strong></td></tr>
-            <tr><td>Control Mean (μ_ctrl):</td><td>{:.2}</td></tr>
-            <tr><td>Treatment Mean (μ_trt):</td><td>{:.2}</td></tr>
-            <tr><td>Standard Deviation (σ):</td><td>{:.2}</td></tr>
-            {}
-            {}
-            <tr><td>Sample Size (N):</td><td>{}</td></tr>
-            <tr><td>Simulations:</td><td>{}</td></tr>
-            <tr><td>Success Threshold (1/α):</td><td>{}</td></tr>
-            <tr><td>Futility Watch:</td><td>{}</td></tr>
-            <tr><td>Burn-in:</td><td>{}</td></tr>
-            <tr><td>Ramp:</td><td>{}</td></tr>
-            <tr><td>c_max (e-RTc):</td><td>{}</td></tr>
-            <tr><td>Seed:</td><td>{}</td></tr>
-        </table>
-
-        {}
-
-        {}
-
-        {}
-    </div>
-</body>
-</html>"#,
-        timestamp, method_str,
-        mu_ctrl, mu_trt, sd,
-        bounds_row, design_effect_row,
-        n_patients, n_sims, success_threshold, futility_watch,
-        burn_in, ramp, c_max, seed_str,
-        power_comparison,
-        equations,
-        method_sections
-    )
+<html><head><meta charset="utf-8"><title>e-RT Continuous</title>
+<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
+<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
+</head><body>
+<h1>e-RT Continuous</h1>
+<pre>{}</pre>
+{}
+</body></html>"#, summary, plots)
 }
 
-fn build_method_section(
-    name: &str,
-    effect_label: &str,
-    res: &MethodResults,
-    design_effect: f64,
-    n_patients: usize,
-    n_sims: usize,
-    _min_val: Option<f64>,
-    _max_val: Option<f64>,
-    run_futility: bool,
-    futility_watch: f64,
-    plot_id: usize,
-) -> String {
-    let mut html = format!(r#"
-        <div class="method-section">
-        <h2>{} Results</h2>
-
-        <h3>Operating Characteristics</h3>
-        <table>
-            <tr class="highlight"><td>Type I Error:</td><td>{:.2}%</td></tr>
-            <tr class="highlight"><td>Power (Success Rate):</td><td>{:.1}%</td></tr>
-            <tr><td>No Stop:</td><td>{} ({:.1}%)</td></tr>
-        </table>
-
-        <h3>Success Analysis</h3>
-        <table>
-            <tr><td>Number of Successes:</td><td>{}</td></tr>
-            <tr><td>Average Stopping Point:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
-            <tr><td>Effect at Stop ({}):</td><td>{:.3}</td></tr>
-            <tr><td>Effect at End ({}):</td><td>{:.3}</td></tr>
-            <tr><td>Type M Error (Magnification):</td><td>{:.2}x</td></tr>
-        </table>
-    "#,
-        name,
-        res.type1_error,
-        (res.success_count as f64 / n_sims as f64) * 100.0,
-        res.no_stop_count, (res.no_stop_count as f64 / n_sims as f64) * 100.0,
-        res.success_count,
-        res.avg_stop_n, (res.avg_stop_n / n_patients as f64) * 100.0,
-        effect_label, res.avg_effect_stop,
-        effect_label, res.avg_effect_final,
-        res.type_m_error
-    );
-
-    // Futility section
-    if run_futility {
-        if let Some((n_trig, med_patient, med_effect, q25, q50, q75, trig_success)) = res.futility_stats {
-            html.push_str(&format!(r#"
-        <h3>Futility Analysis</h3>
-        <table>
-            <tr><td>Trials triggering (wealth &lt; {:.1}):</td><td><strong>{} ({:.1}%)</strong></td></tr>
-            <tr><td>Median patient at trigger:</td><td>{:.0} ({:.0}% of N)</td></tr>
-            <tr><td>Median required {} :</td><td>{:.3}</td></tr>
-            <tr><td>Design {}:</td><td>{:.3}</td></tr>
-            <tr><td>Ratio (Required/Design) - 25th pctl:</td><td>{:.2}x</td></tr>
-            <tr><td>Ratio (Required/Design) - Median:</td><td>{:.2}x</td></tr>
-            <tr><td>Ratio (Required/Design) - 75th pctl:</td><td>{:.2}x</td></tr>
-            <tr><td>Triggered trials that succeeded:</td><td>{} ({:.1}%)</td></tr>
-        </table>
-            "#,
-                futility_watch, n_trig, (n_trig as f64 / n_sims as f64) * 100.0,
-                med_patient, (med_patient / n_patients as f64) * 100.0,
-                effect_label, med_effect,
-                effect_label, design_effect,
-                q25, q50, q75,
-                trig_success, (trig_success as f64 / n_trig as f64) * 100.0
-            ));
-        }
-    }
-
-    // Trajectory data
+fn build_plots(name: &str, res: &MethodResults, n_patients: usize, n_sims: usize,
+               success_threshold: f64, futility_watch: f64, id: usize) -> String {
     let mut x_axis: Vec<usize> = Vec::new();
     let mut y_median: Vec<f64> = Vec::new();
     let mut y_lower: Vec<f64> = Vec::new();
@@ -864,7 +661,6 @@ fn build_method_section(
     let up_json = format!("{:?}", y_upper);
     let stops_json = format!("{:?}", res.stop_times);
 
-    // Sample trajectories
     let mut sample_traces = String::new();
     for idx in 0..30.min(res.trajectories.len()) {
         let ds: Vec<f64> = res.trajectories[idx].iter().enumerate()
@@ -876,87 +672,31 @@ fn build_method_section(
         ));
     }
 
-    html.push_str(&format!(r#"
-        <h3>Visualizations</h3>
-
-        <h4>e-Value Trajectories (Median with 95% CI)</h4>
-        <div id="plot{}_1" style="width:100%;height:450px;"></div>
-
-        <h4>Sample Trajectories (30 runs)</h4>
-        <div id="plot{}_2" style="width:100%;height:450px;"></div>
-
-        <h4>Stopping Times Distribution</h4>
-        <div id="plot{}_3" style="width:100%;height:350px;"></div>
-        "#, plot_id, plot_id, plot_id));
-
-    if run_futility && !res.required_effects.is_empty() {
-        let req_json = format!("{:?}", res.required_effects);
-        html.push_str(&format!(r#"
-        <h4>Required {} Distribution (at Futility Trigger)</h4>
-        <div id="plot{}_4" style="width:100%;height:350px;"></div>
-        "#, effect_label, plot_id));
-
-        html.push_str(&format!(r#"
-        <script>
-            Plotly.newPlot('plot{}_4', [{{
-                type: 'histogram',
-                x: {},
-                marker: {{color: 'steelblue'}}
-            }}], {{
-                shapes: [{{type:'line',x0:{:.3},x1:{:.3},y0:0,y1:1,yref:'paper',line:{{color:'red',width:2,dash:'dash'}}}}],
-                xaxis: {{title: 'Required {}'}},
-                yaxis: {{title: 'Count'}},
-                annotations: [{{x:{:.3},y:1,yref:'paper',text:'Design',showarrow:false,font:{{color:'red'}}}}]
-            }});
-        </script>
-        "#, plot_id, req_json, design_effect, design_effect, effect_label, design_effect));
-    }
-
-    html.push_str(&format!(r#"
-        <script>
-            // Plot 1: Median + 95% CI
-            Plotly.newPlot('plot{}_1', [
-                {{type:'scatter',mode:'lines',x:{},y:{},line:{{width:0}},showlegend:false}},
-                {{type:'scatter',mode:'lines',x:{},y:{},fill:'tonexty',fillcolor:'rgba(31,119,180,0.3)',line:{{width:0}},showlegend:false}},
-                {{type:'scatter',mode:'lines',x:{},y:{},line:{{color:'blue',width:2.5}},name:'Median'}}
-            ], {{
-                yaxis: {{type:'log',title:'e-value'}},
-                xaxis: {{title:'Patients Enrolled'}},
-                shapes: [
-                    {{type:'line',x0:0,x1:1,xref:'paper',y0:20,y1:20,line:{{color:'green',width:2,dash:'dash'}}}},
-                    {{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',width:1.5,dash:'dot'}}}}
-                ]
-            }});
-
-            // Plot 2: Sample trajectories
-            Plotly.newPlot('plot{}_2', [
-                {}
-                {{type:'scatter',mode:'lines',x:[0,{}],y:[20,20],line:{{color:'green',width:2,dash:'dash'}},name:'Success'}},
-                {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1.5,dash:'dot'}},name:'Futility Watch'}}
-            ], {{
-                yaxis: {{type:'log',title:'e-value'}},
-                xaxis: {{title:'Patients Enrolled'}}
-            }});
-
-            // Plot 3: Stopping times
-            Plotly.newPlot('plot{}_3', [{{
-                type: 'histogram',
-                x: {},
-                marker: {{color: 'green'}}
-            }}], {{
-                xaxis: {{title: 'Patient Number at Stop'}},
-                yaxis: {{title: 'Count'}}
-            }});
-        </script>
-        </div>
-    "#,
-        plot_id, x_json, low_json, x_json, up_json, x_json, med_json,
-        futility_watch, futility_watch,
-        plot_id, sample_traces, n_patients, n_patients, futility_watch, futility_watch,
-        plot_id, stops_json
-    ));
-
-    html
+    format!(r#"
+<h2>{}</h2>
+<div id="p{}_1" style="height:400px"></div>
+<div id="p{}_2" style="height:400px"></div>
+<div id="p{}_3" style="height:300px"></div>
+<script>
+Plotly.newPlot('p{}_1',[
+  {{type:'scatter',x:{},y:{},line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},fill:'tonexty',fillcolor:'rgba(31,119,180,0.3)',line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{},line:{{color:'blue',width:2}},name:'Median'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},
+  shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}}]}});
+Plotly.newPlot('p{}_2',[{}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Threshold'}},
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'orange',width:1,dash:'dot'}},name:'Futility'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}}}});
+Plotly.newPlot('p{}_3',[{{type:'histogram',x:{},marker:{{color:'steelblue'}}}}],{{xaxis:{{title:'Stop Time'}},yaxis:{{title:'Count'}}}});
+</script>"#,
+        name, id, id, id,
+        id, x_json, low_json, x_json, up_json, x_json, med_json,
+        success_threshold, success_threshold,
+        id, sample_traces, n_patients, success_threshold, success_threshold,
+        n_patients, futility_watch, futility_watch,
+        id, stops_json
+    )
 }
 
 // === MAIN ===

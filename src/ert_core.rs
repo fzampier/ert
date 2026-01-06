@@ -308,6 +308,26 @@ pub fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
 }
 
+/// Standard normal quantile (inverse CDF)
+pub fn normal_quantile(p: f64) -> f64 {
+    if p <= 0.0 { return f64::NEG_INFINITY; }
+    if p >= 1.0 { return f64::INFINITY; }
+    if (p - 0.5).abs() < 1e-10 { return 0.0; }
+
+    let p_low = if p < 0.5 { p } else { 1.0 - p };
+    let t = (-2.0 * p_low.ln()).sqrt();
+
+    let c0 = 2.515517;
+    let c1 = 0.802853;
+    let c2 = 0.010328;
+    let d1 = 1.432788;
+    let d2 = 0.189269;
+    let d3 = 0.001308;
+
+    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
+    if p < 0.5 { -z } else { z }
+}
+
 /// Error function approximation (Abramowitz and Stegun)
 fn erf(x: f64) -> f64 {
     let a1 =  0.254829592;
