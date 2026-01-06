@@ -80,14 +80,23 @@ impl MADProcess {
     }
 
     fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
+        // Continuous direction: standardized effect estimate (not binary!)
         let direction = if !self.outcomes.is_empty() {
-            let trt_vals: Vec<f64> = self.outcomes.iter().zip(self.treatments.iter())
-                .filter(|(_, &t)| t).map(|(&o, _)| o).collect();
-            let ctrl_vals: Vec<f64> = self.outcomes.iter().zip(self.treatments.iter())
-                .filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-            let mean_trt = if !trt_vals.is_empty() { trt_vals.iter().sum::<f64>() / trt_vals.len() as f64 } else { 0.0 };
-            let mean_ctrl = if !ctrl_vals.is_empty() { ctrl_vals.iter().sum::<f64>() / ctrl_vals.len() as f64 } else { 0.0 };
-            if mean_trt > mean_ctrl { 1.0 } else if mean_trt < mean_ctrl { -1.0 } else { 0.0 }
+            let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
+            let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
+            for (o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+                if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
+                else { sum_c += o; ss_c += o * o; n_c += 1.0; }
+            }
+            if n_t > 1.0 && n_c > 1.0 {
+                let m_t = sum_t / n_t;
+                let m_c = sum_c / n_c;
+                let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
+                let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
+                let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(0.001);
+                let delta = (m_t - m_c) / pooled_sd;  // standardized effect
+                delta.clamp(-1.0, 1.0)  // bounded continuous direction
+            } else { 0.0 }
         } else { 0.0 };
 
         self.outcomes.push(outcome);

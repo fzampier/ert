@@ -86,14 +86,23 @@ impl MADProcess {
     }
 
     fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
+        // Continuous direction: standardized effect estimate (not binary!)
         let direction = if !self.outcomes.is_empty() {
-            let (mut sum_t, mut n_t, mut sum_c, mut n_c) = (0.0, 0.0, 0.0, 0.0);
+            let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
+            let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
             for (o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
-                if t { sum_t += o; n_t += 1.0; } else { sum_c += o; n_c += 1.0; }
+                if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
+                else { sum_c += o; ss_c += o * o; n_c += 1.0; }
             }
-            let m_t = if n_t > 0.0 { sum_t / n_t } else { 0.0 };
-            let m_c = if n_c > 0.0 { sum_c / n_c } else { 0.0 };
-            if m_t > m_c { 1.0 } else if m_t < m_c { -1.0 } else { 0.0 }
+            if n_t > 1.0 && n_c > 1.0 {
+                let m_t = sum_t / n_t;
+                let m_c = sum_c / n_c;
+                let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
+                let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
+                let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(0.001);
+                let delta = (m_t - m_c) / pooled_sd;  // standardized effect
+                delta.clamp(-1.0, 1.0)  // bounded continuous direction
+            } else { 0.0 }
         } else { 0.0 };
 
         self.outcomes.push(outcome);
@@ -189,7 +198,6 @@ fn run_simulation<R: Rng + ?Sized>(
 ) -> (Vec<Trial>, Vec<Vec<f64>>, Vec<usize>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
     let alpha = 1.0 / threshold;
-    let good_threshold = if method == Method::LinearERT { (min_val + max_val) / 2.0 } else { mu_ctrl };
 
     // Sample indices for trajectories
     let sample_indices: Vec<usize> = (0..30.min(n_sims)).collect();
@@ -216,6 +224,7 @@ fn run_simulation<R: Rng + ?Sized>(
         let mut effect_at_stop = 0.0;
         let mut min_wealth = 1.0f64;
         let mut outcomes: Vec<(f64, bool)> = Vec::with_capacity(n_pts);
+        let mut all_outcomes: Vec<f64> = Vec::with_capacity(n_pts); // for running median
 
         // Agnostic tracker
         let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
@@ -236,10 +245,16 @@ fn run_simulation<R: Rng + ?Sized>(
 
                 proc.update(i, outcome, is_trt);
                 min_wealth = min_wealth.min(proc.wealth);
+                all_outcomes.push(outcome);
 
-                // Agnostic
+                // Agnostic with running median
                 if !agnostic_stopped {
-                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > good_threshold };
+                    let running_med = if all_outcomes.len() > 1 {
+                        let mut sorted = all_outcomes.clone();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        sorted[sorted.len() / 2]
+                    } else { outcome };
+                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
                     if agnostic.observe(signal) { agnostic_stopped = true; }
                 }
 
@@ -273,10 +288,16 @@ fn run_simulation<R: Rng + ?Sized>(
 
                 proc.update(i, outcome, is_trt);
                 min_wealth = min_wealth.min(proc.wealth);
+                all_outcomes.push(outcome);
 
-                // Agnostic
+                // Agnostic with running median
                 if !agnostic_stopped {
-                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > good_threshold };
+                    let running_med = if all_outcomes.len() > 1 {
+                        let mut sorted = all_outcomes.clone();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        sorted[sorted.len() / 2]
+                    } else { outcome };
+                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
                     if agnostic.observe(signal) { agnostic_stopped = true; }
                 }
 
