@@ -360,15 +360,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     // Method selection
     let method_choice = get_choice("\nSelect analysis method:", &[
-        "LinearERT (for bounded outcomes, e.g., VFD 0-28)",
-        "MAD-based (for unbounded outcomes)",
+        "e-RTo (ordinal/bounded, e.g., VFD 0-28)",
+        "e-RTc (continuous/unbounded)",
     ]);
 
     let method = if method_choice == 1 { Method::LinearERT } else { Method::MAD };
 
-    // Get bounds if LinearERT
+    // Get bounds if e-RTo
     let (analysis_min, analysis_max) = if method == Method::LinearERT {
-        println!("\nLinearERT requires outcome bounds.");
+        println!("\ne-RTo requires outcome bounds.");
         println!("  Observed range: [{:.2}, {:.2}]", min_val, max_val);
         let mn = get_input("Min bound (e.g., 0): ");
         let mx = get_input("Max bound (e.g., 28): ");
@@ -853,8 +853,8 @@ fn analyze_data(
 
 fn print_results(result: &AnalysisResult, success_threshold: f64, futility_threshold: Option<f64>) {
     let method_name = match result.method {
-        Method::LinearERT => "LinearERT",
-        Method::MAD => "MAD-based",
+        Method::LinearERT => "e-RTo",
+        Method::MAD => "e-RTc",
     };
 
     let effect_label = match result.method {
@@ -967,8 +967,8 @@ fn build_html_report(
     let timestamp = chrono_lite();
 
     let method_name = match result.method {
-        Method::LinearERT => "LinearERT",
-        Method::MAD => "MAD-based",
+        Method::LinearERT => "e-RTo",
+        Method::MAD => "e-RTc",
     };
 
     let effect_label = match result.method {

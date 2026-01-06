@@ -13,14 +13,14 @@ fn main() {
     println!("   e-RT: Sequential Randomization Tests");
     println!("==========================================");
     println!("\nSelect an option:");
-    println!("  1. Binary Endpoint Simulation");
-    println!("  2. Continuous Endpoint Simulation");
-    println!("  3. Survival Endpoint Simulation");
-    println!("  4. Multi-State Simulation");
-    println!("  5. Agnostic e-RT (Universal)");
+    println!("  1. e-RT   (binary endpoint)");
+    println!("  2. e-RTo/c (continuous endpoint)");
+    println!("  3. e-RTs  (survival/time-to-event)");
+    println!("  4. e-RTms (multi-state)");
+    println!("  5. e-RTu  (universal/agnostic)");
     println!("  6. Analyze Binary Trial (CSV)");
     println!("  7. Analyze Continuous Trial (CSV)");
-    println!("  8. Compare Methods (LinearERT vs MAD)");
+    println!("  8. Compare e-RTo vs e-RTc");
     println!("  9. Exit");
 
     print!("\nSelect: ");

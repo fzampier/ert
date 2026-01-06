@@ -202,7 +202,7 @@ pub fn run() {
     // === PHASE 2: POWER & FUTILITY ANALYSIS (with Agnostic comparison) ===
     print!("Phase 2: Power Analysis");
     if run_futility { print!(" + Futility"); }
-    print!(" + Agnostic");
+    print!(" + e-RTu");
     println!("...");
     io::stdout().flush().unwrap();
 
@@ -378,7 +378,7 @@ pub fn run() {
     println!("\n--- Power Comparison at N={} ---", n_patients);
     println!("Z-test (fixed):      {:.1}%  <- ceiling (traditional)", z_test_power);
     println!("e-RT binary:         {:.1}%  <- domain-aware sequential", (success_count as f64/n_sims as f64)*100.0);
-    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+    println!("e-RTu:               {:.1}%  <- floor (universal)", agnostic_power);
 
     println!("\nDomain knowledge:    +{:.1}%", (success_count as f64/n_sims as f64)*100.0 - agnostic_power);
     println!("Sequential cost:     -{:.1}%", z_test_power - (success_count as f64/n_sims as f64)*100.0);
@@ -387,7 +387,7 @@ pub fn run() {
         println!("\n--- Stopping Analysis ---");
         println!("e-RT Avg Stop:       {:.0} ({:.0}% of N)", avg_stop_n, (avg_stop_n / n_patients as f64) * 100.0);
         if !agnostic_stop_times.is_empty() {
-            println!("Agnostic Avg Stop:   {:.0} ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
+            println!("e-RTu Avg Stop:      {:.0} ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
         }
         println!("Type M Error:        {:.2}x", type_m_error);
     }
@@ -603,7 +603,7 @@ fn build_html_report(
         <table>
             <tr><td>Z-test (fixed):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">ceiling (traditional)</td></tr>
             <tr><td>e-RT binary:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
         </table>
         <table>
             <tr><td>Domain knowledge value:</td><td>+{:.1}%</td></tr>
@@ -614,7 +614,7 @@ fn build_html_report(
         <table>
             <tr><td>Successes (e-RT):</td><td>{}</td></tr>
             <tr><td>e-RT Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
-            <tr><td>Agnostic Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
+            <tr><td>e-RTu Avg Stop:</td><td>{:.0} patients ({:.0}% of N)</td></tr>
             <tr><td>Type M Error:</td><td>{:.2}x</td></tr>
         </table>
 

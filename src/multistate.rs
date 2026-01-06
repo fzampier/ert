@@ -621,10 +621,10 @@ th{{background:#f1f3f4}}
 <table>
 <tr style="background:#e8f8e8;"><td>Prop. Odds (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
 <tr style="background:#fff8e8;"><td>e-RTms (sequential):</td><td><strong>{:.1}%</strong></td><td>← domain-aware sequential</td></tr>
-<tr style="background:#f8e8e8;"><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td>← floor (universal)</td></tr>
-<tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTms − agnostic)</td></tr>
-<tr><td>Sequential cost:</td><td>−{:.1}%</td><td>(PO − e-RTms)</td></tr>
-<tr><td>Agnostic Type I error:</td><td>{:.2}%</td><td></td></tr>
+<tr style="background:#f8e8e8;"><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td>floor (universal)</td></tr>
+<tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTms - e-RTu)</td></tr>
+<tr><td>Sequential cost:</td><td>-{:.1}%</td><td>(PO - e-RTms)</td></tr>
+<tr><td>e-RTu Type I error:</td><td>{:.2}%</td><td></td></tr>
 </table>
 <p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
 
@@ -747,14 +747,14 @@ pub fn run() {
     let agnostic_power = (alt.agnostic_successes as f64 / n_sims as f64) * 100.0;
     let agnostic_null_rate = (null.agnostic_successes as f64 / n_sims as f64) * 100.0;
     println!("e-RTms Power:    {:.1}%", ert_power);
-    println!("Agnostic Power:  {:.1}%", agnostic_power);
-    println!("Agnostic Type I: {:.2}%", agnostic_null_rate);
+    println!("e-RTu Power:     {:.1}%", agnostic_power);
+    println!("e-RTu Type I:    {:.2}%", agnostic_null_rate);
 
     // Three-tier power comparison
     println!("\n--- Power Comparison (Three-Tier Hierarchy) ---");
     println!("Prop. Odds (fixed):  {:.1}%  <- ceiling (traditional)", benchmark.power_at_n * 100.0);
     println!("e-RTms (sequential): {:.1}%  <- domain-aware sequential", ert_power);
-    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+    println!("e-RTu:               {:.1}%  <- floor (universal)", agnostic_power);
     println!("\nDomain knowledge:    {:+.1}%", ert_power - agnostic_power);
     println!("Sequential cost:     -{:.1}%", benchmark.power_at_n * 100.0 - ert_power);
 

@@ -363,7 +363,7 @@ fn build_html(
     alt: &SimResults,
 ) -> String {
     format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Agnostic e-RT Report</title>
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>e-RTu Report</title>
 <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
 <style>
 body{{font-family:sans-serif;max-width:1000px;margin:0 auto;padding:20px;background:#f8f9fa}}
@@ -374,8 +374,8 @@ th,td{{padding:10px 16px;border-bottom:1px solid #eee;text-align:left}}
 .hl{{background:#f3e8ff;font-weight:bold}}
 .note{{font-size:0.9em;color:#7f8c8d;margin-top:10px}}
 </style></head><body>
-<h1>Agnostic e-RT Report</h1>
-<p>Universal "Bet on Sight" Sequential Test</p>
+<h1>e-RTu Report</h1>
+<p>Universal Sequential Test</p>
 <p>Generated: {}</p>
 
 <h2>Design</h2>
@@ -458,14 +458,14 @@ Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{co
 
 pub fn run() {
     println!("\n==========================================");
-    println!("   AGNOSTIC e-RT (Bet on Sight)");
+    println!("   e-RTu (Universal)");
     println!("==========================================\n");
 
     println!("The universal e-process. Sees only: (arm, good/bad)");
-    println!("Doesn't care what generates the signals.\n");
+    println!("Domain-agnostic. Works on any signal source.\n");
 
     println!("Demo mode: Binary signal generator");
-    println!("─────────────────────────────────────────\n");
+    println!("------------------------------------------\n");
 
     let p_ctrl = get_input("P(good | control), e.g. 0.30: ");
     let p_trt = get_input("P(good | treatment), e.g. 0.40: ");

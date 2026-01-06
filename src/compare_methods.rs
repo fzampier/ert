@@ -1,4 +1,4 @@
-//! Compare LinearERT vs MAD-based methods under identical conditions
+//! Compare e-RTo vs e-RTc methods under identical conditions
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -169,10 +169,10 @@ struct ComparisonResult {
 
 pub fn run() {
     println!("\n==========================================");
-    println!("   COMPARE: LinearERT vs MAD-based");
+    println!("   COMPARE: e-RTo vs e-RTc");
     println!("==========================================\n");
 
-    println!("This runs BOTH methods on IDENTICAL simulated data");
+    println!("Runs BOTH methods on IDENTICAL simulated data");
     println!("for a fair head-to-head comparison.\n");
 
     // Get parameters
@@ -289,8 +289,8 @@ fn run_comparison(
     }
 
     println!("Done.");
-    println!("  LinearERT: {:.2}%", (linear_null_reject as f64 / n_sims as f64) * 100.0);
-    println!("  MAD-based: {:.2}%", (mad_null_reject as f64 / n_sims as f64) * 100.0);
+    println!("  e-RTo: {:.2}%", (linear_null_reject as f64 / n_sims as f64) * 100.0);
+    println!("  e-RTc: {:.2}%", (mad_null_reject as f64 / n_sims as f64) * 100.0);
 
     // =========== Phase 2: Power (alternative hypothesis) ===========
     print!("\nPhase 2: Power (H1: treatment works)");
@@ -435,7 +435,7 @@ fn run_comparison(
         ramp,
         c_max,
         linear: MethodStats {
-            name: "LinearERT".to_string(),
+            name: "e-RTo".to_string(),
             type1_error: (linear_null_reject as f64 / n_sims as f64) * 100.0,
             power: linear_power,
             avg_stop_n: linear_avg_stop,
@@ -446,7 +446,7 @@ fn run_comparison(
             stop_times: linear_stop_times,
         },
         mad: MethodStats {
-            name: "MAD-based".to_string(),
+            name: "e-RTc".to_string(),
             type1_error: (mad_null_reject as f64 / n_sims as f64) * 100.0,
             power: mad_power,
             avg_stop_n: mad_avg_stop,
@@ -487,31 +487,31 @@ fn print_comparison(r: &ComparisonResult) {
     println!("Threshold:      {:.0}", r.success_threshold);
 
     println!("\n--- Type I Error (should be ~{:.1}%) ---", 100.0 / r.success_threshold);
-    println!("  LinearERT:  {:.2}%", r.linear.type1_error);
-    println!("  MAD-based:  {:.2}%", r.mad.type1_error);
+    println!("  e-RTo:  {:.2}%", r.linear.type1_error);
+    println!("  e-RTc:  {:.2}%", r.mad.type1_error);
 
     println!("\n--- Power ---");
-    println!("  LinearERT:  {:.1}%", r.linear.power);
-    println!("  MAD-based:  {:.1}%", r.mad.power);
+    println!("  e-RTo:  {:.1}%", r.linear.power);
+    println!("  e-RTc:  {:.1}%", r.mad.power);
     let power_diff = r.linear.power - r.mad.power;
     if power_diff.abs() > 0.5 {
         println!("  Δ Power:    {:.1}% ({})", power_diff.abs(),
-            if power_diff > 0.0 { "LinearERT wins" } else { "MAD wins" });
+            if power_diff > 0.0 { "e-RTo wins" } else { "e-RTc wins" });
     } else {
         println!("  Δ Power:    ~0% (tied)");
     }
 
     println!("\n--- Average Stopping Time (when successful) ---");
-    println!("  LinearERT:  {:.0} patients ({:.0}% of N)", r.linear.avg_stop_n, (r.linear.avg_stop_n / r.n_patients as f64) * 100.0);
-    println!("  MAD-based:  {:.0} patients ({:.0}% of N)", r.mad.avg_stop_n, (r.mad.avg_stop_n / r.n_patients as f64) * 100.0);
+    println!("  e-RTo:  {:.0} patients ({:.0}% of N)", r.linear.avg_stop_n, (r.linear.avg_stop_n / r.n_patients as f64) * 100.0);
+    println!("  e-RTc:  {:.0} patients ({:.0}% of N)", r.mad.avg_stop_n, (r.mad.avg_stop_n / r.n_patients as f64) * 100.0);
 
     println!("\n--- Type M Error (effect magnification) ---");
-    println!("  LinearERT:  {:.2}x", r.linear.type_m);
-    println!("  MAD-based:  {:.2}x", r.mad.type_m);
+    println!("  e-RTo:  {:.2}x", r.linear.type_m);
+    println!("  e-RTc:  {:.2}x", r.mad.type_m);
 
     println!("\n--- Head-to-Head (same trials) ---");
-    println!("  LinearERT stopped first: {} ({:.1}%)", r.linear_wins, (r.linear_wins as f64 / r.n_sims as f64) * 100.0);
-    println!("  MAD-based stopped first: {} ({:.1}%)", r.mad_wins, (r.mad_wins as f64 / r.n_sims as f64) * 100.0);
+    println!("  e-RTo stopped first: {} ({:.1}%)", r.linear_wins, (r.linear_wins as f64 / r.n_sims as f64) * 100.0);
+    println!("  e-RTc stopped first: {} ({:.1}%)", r.mad_wins, (r.mad_wins as f64 / r.n_sims as f64) * 100.0);
     println!("  Both stopped (total):    {}", r.both_stopped);
     println!("  Neither stopped:         {} ({:.1}%)", r.neither_stopped, (r.neither_stopped as f64 / r.n_sims as f64) * 100.0);
 }
@@ -554,15 +554,15 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
     let power_winner = if (r.linear.power - r.mad.power).abs() < 1.0 {
         "Tied"
     } else if r.linear.power > r.mad.power {
-        "LinearERT"
+        "e-RTo"
     } else {
-        "MAD-based"
+        "e-RTc"
     };
 
     let speed_winner = if r.linear.avg_stop_n < r.mad.avg_stop_n * 0.95 {
-        "LinearERT"
+        "e-RTo"
     } else if r.mad.avg_stop_n < r.linear.avg_stop_n * 0.95 {
-        "MAD-based"
+        "e-RTc"
     } else {
         "Tied"
     };
@@ -571,7 +571,7 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Method Comparison: LinearERT vs MAD-based</title>
+    <title>Method Comparison: e-RTo vs e-RTc</title>
     <script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -595,7 +595,7 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
 </head>
 <body>
     <div class="container">
-        <h1>Method Comparison: LinearERT vs MAD-based</h1>
+        <h1>Method Comparison: e-RTo vs e-RTc</h1>
         <p class="timestamp">Generated: {}</p>
 
         <h2>Simulation Parameters</h2>
@@ -615,19 +615,19 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
         <div class="comparison-grid">
             <div class="metric-card">
                 <div class="metric-value linear">{:.1}%</div>
-                <div class="metric-label">LinearERT Power</div>
+                <div class="metric-label">e-RTo Power</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value mad">{:.1}%</div>
-                <div class="metric-label">MAD-based Power</div>
+                <div class="metric-label">e-RTc Power</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value linear">{:.0}</div>
-                <div class="metric-label">LinearERT Avg Stop</div>
+                <div class="metric-label">e-RTo Avg Stop</div>
             </div>
             <div class="metric-card">
                 <div class="metric-value mad">{:.0}</div>
-                <div class="metric-label">MAD-based Avg Stop</div>
+                <div class="metric-label">e-RTc Avg Stop</div>
             </div>
         </div>
 
@@ -635,8 +635,8 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
         <table>
             <tr>
                 <th>Metric</th>
-                <th class="linear">LinearERT</th>
-                <th class="mad">MAD-based</th>
+                <th class="linear">e-RTo</th>
+                <th class="mad">e-RTc</th>
                 <th>Winner</th>
             </tr>
             <tr>
@@ -667,18 +667,18 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
 
         <h2>Head-to-Head (Same Trials)</h2>
         <table>
-            <tr><td>LinearERT stopped first</td><td><strong>{}</strong> ({:.1}%)</td></tr>
-            <tr><td>MAD-based stopped first</td><td><strong>{}</strong> ({:.1}%)</td></tr>
+            <tr><td>e-RTo stopped first</td><td><strong>{}</strong> ({:.1}%)</td></tr>
+            <tr><td>e-RTc stopped first</td><td><strong>{}</strong> ({:.1}%)</td></tr>
             <tr><td>Both stopped</td><td>{}</td></tr>
             <tr><td>Neither stopped</td><td>{}</td></tr>
         </table>
 
         <h2>e-Value Trajectories</h2>
 
-        <h3 class="linear">LinearERT Trajectories (30 sample trials)</h3>
+        <h3 class="linear">e-RTo Trajectories (30 sample trials)</h3>
         <div id="plot1" style="width:100%;height:400px;"></div>
 
-        <h3 class="mad">MAD-based Trajectories (30 sample trials)</h3>
+        <h3 class="mad">e-RTc Trajectories (30 sample trials)</h3>
         <div id="plot2" style="width:100%;height:400px;"></div>
 
         <h2>Stopping Time Distributions</h2>
@@ -686,14 +686,14 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
     </div>
 
     <script>
-        // LinearERT trajectories
+        // e-RTo trajectories
         Plotly.newPlot('plot1', [
             {}
             {{type:'scatter',mode:'lines',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Threshold'}}
         ], {{
             yaxis: {{type:'log',title:'e-value',range:[-1,2.5]}},
             xaxis: {{title:'Patients Enrolled'}},
-            title: 'LinearERT Sample Trajectories'
+            title: 'e-RTo Sample Trajectories'
         }});
 
         // MAD trajectories
@@ -703,7 +703,7 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
         ], {{
             yaxis: {{type:'log',title:'e-value',range:[-1,2.5]}},
             xaxis: {{title:'Patients Enrolled'}},
-            title: 'MAD-based Sample Trajectories'
+            title: 'e-RTc Sample Trajectories'
         }});
 
         // Stopping times comparison
@@ -711,14 +711,14 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
             {{
                 type: 'histogram',
                 x: {},
-                name: 'LinearERT',
+                name: 'e-RTo',
                 opacity: 0.7,
                 marker: {{color: '#1f77b4'}}
             }},
             {{
                 type: 'histogram',
                 x: {},
-                name: 'MAD-based',
+                name: 'e-RTc',
                 opacity: 0.7,
                 marker: {{color: '#ff7f0e'}}
             }}
@@ -740,18 +740,18 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
         r.linear.avg_stop_n, r.mad.avg_stop_n,
         // Type I
         r.linear.type1_error, r.mad.type1_error,
-        if r.linear.type1_error < r.mad.type1_error { "LinearERT" } else { "MAD-based" },
+        if r.linear.type1_error < r.mad.type1_error { "e-RTo" } else { "e-RTc" },
         // Power
-        if power_winner == "LinearERT" { "winner" } else if power_winner == "MAD-based" { "" } else { "" },
+        if power_winner == "e-RTo" { "winner" } else if power_winner == "e-RTc" { "" } else { "" },
         r.linear.power, r.mad.power, power_winner,
         // Speed
-        if speed_winner == "LinearERT" { "winner" } else if speed_winner == "MAD-based" { "" } else { "" },
+        if speed_winner == "e-RTo" { "winner" } else if speed_winner == "e-RTc" { "" } else { "" },
         r.linear.avg_stop_n, (r.linear.avg_stop_n / r.n_patients as f64) * 100.0,
         r.mad.avg_stop_n, (r.mad.avg_stop_n / r.n_patients as f64) * 100.0,
         speed_winner,
         // Type M
         r.linear.type_m, r.mad.type_m,
-        if r.linear.type_m < r.mad.type_m { "LinearERT" } else { "MAD-based" },
+        if r.linear.type_m < r.mad.type_m { "e-RTo" } else { "e-RTc" },
         // Head-to-head
         r.linear_wins, (r.linear_wins as f64 / r.n_sims as f64) * 100.0,
         r.mad_wins, (r.mad_wins as f64 / r.n_sims as f64) * 100.0,

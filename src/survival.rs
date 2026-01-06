@@ -613,16 +613,16 @@ pub fn run() {
     let e_surv_power = (success_count as f64 / n_sims as f64) * 100.0;
     println!("\n--- Power Comparison at N={} (~{} events) ---", n_patients, expected_events);
     println!("Log-rank (fixed):    {:.1}%  <- ceiling (traditional)", lr_power);
-    println!("e-survival:          {:.1}%  <- domain-aware sequential", e_surv_power);
-    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+    println!("e-RTs:               {:.1}%  <- domain-aware sequential", e_surv_power);
+    println!("e-RTu:               {:.1}%  <- floor (universal)", agnostic_power);
     println!("\nDomain knowledge:    {:+.1}%", e_surv_power - agnostic_power);
     println!("Sequential cost:     -{:.1}%", lr_power - e_surv_power);
 
     if success_count > 0 {
         println!("\n--- Stopping Analysis ---");
-        println!("e-surv Avg Stop:     {:.0} events ({:.0}% of N)", avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0);
+        println!("e-RTs Avg Stop:      {:.0} events ({:.0}% of N)", avg_stop_event, (avg_stop_event / n_patients as f64) * 100.0);
         if !agnostic_stop_events.is_empty() {
-            println!("Agnostic Avg Stop:   {:.0} events ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
+            println!("e-RTu Avg Stop:      {:.0} events ({:.0}% of N)", agnostic_avg_stop, (agnostic_avg_stop / n_patients as f64) * 100.0);
         }
         println!("HR @ Stop:           {:.3}", avg_hr_stop);
         println!("HR @ End:            {:.3}", avg_hr_final);
@@ -814,10 +814,10 @@ Wⱼ = Wⱼ₋₁ × (1 + λⱼ × Uⱼ)             # wealth update (events onl
         <h2>Power Comparison (Three-Tier Hierarchy)</h2>
         <table>
             <tr style="background:#e8f8e8;"><td>Log-rank (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
-            <tr style="background:#fff8e8;"><td>e-survival (sequential):</td><td><strong>{:.1}%</strong></td><td>← domain-aware sequential</td></tr>
-            <tr style="background:#f8e8e8;"><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td>← floor (universal)</td></tr>
-            <tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-survival − agnostic)</td></tr>
-            <tr><td>Sequential cost:</td><td>−{:.1}%</td><td>(log-rank − e-survival)</td></tr>
+            <tr style="background:#fff8e8;"><td>e-RTs (sequential):</td><td><strong>{:.1}%</strong></td><td>domain-aware sequential</td></tr>
+            <tr style="background:#f8e8e8;"><td>e-RTu (universal):</td><td><strong>{:.1}%</strong></td><td>floor (universal)</td></tr>
+            <tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTs - e-RTu)</td></tr>
+            <tr><td>Sequential cost:</td><td>-{:.1}%</td><td>(log-rank - e-RTs)</td></tr>
         </table>
         <p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
 

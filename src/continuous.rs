@@ -356,7 +356,7 @@ fn run_simulation<R: Rng + ?Sized>(
     ramp: usize,
     c_max: f64,
 ) -> MethodResults {
-    let method_name = if method == Method::LinearERT { "LinearERT" } else { "MAD" };
+    let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
 
     // Phase 1: Type I Error
     print!("  {} Type I Error... ", method_name);
@@ -606,9 +606,9 @@ fn build_html_report(
     let seed_str = seed.map_or("random".to_string(), |s| s.to_string());
 
     let method_str = match method_choice {
-        1 => "LinearERT",
-        2 => "MAD-based",
-        _ => "LinearERT + MAD-based",
+        1 => "e-RTo",
+        2 => "e-RTc",
+        _ => "e-RTo + e-RTc",
     };
 
     // Build method sections
@@ -618,7 +618,7 @@ fn build_html_report(
         let effect_label = "Mean Difference";
         let design_eff = design_effect_linear.unwrap_or(0.0);
         method_sections.push_str(&build_method_section(
-            "LinearERT", effect_label, res, design_eff, n_patients, n_sims,
+            "e-RTo", effect_label, res, design_eff, n_patients, n_sims,
             min_val, max_val, run_futility, futility_watch, 1
         ));
     }
@@ -627,14 +627,14 @@ fn build_html_report(
         let effect_label = "Cohen's d";
         let design_eff = design_effect_mad.unwrap_or(0.0);
         method_sections.push_str(&build_method_section(
-            "MAD-based", effect_label, res, design_eff, n_patients, n_sims,
+            "e-RTc", effect_label, res, design_eff, n_patients, n_sims,
             None, None, run_futility, futility_watch, 2
         ));
     }
 
     // Equations
     let linear_eq = r#"
-    <h3>LinearERT Equations</h3>
+    <h3>e-RTo Equations</h3>
     <pre>
 x = (Y - min) / (max - min)           # normalize to [0,1]
 scalar = 2x - 1                        # map to [-1,1]
@@ -643,7 +643,7 @@ scalar = 2x - 1                        # map to [-1,1]
     </pre>"#;
 
     let mad_eq = r#"
-    <h3>MAD-based Equations</h3>
+    <h3>e-RTc Equations</h3>
     <pre>
 m = median(Y₁, ..., Y_{i-1})           # robust center
 s = MAD(Y₁, ..., Y_{i-1})              # robust scale
@@ -673,16 +673,16 @@ direction = sign(mean_trt - mean_ctrl) # from past data
     if let Some(res) = linear_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
         power_comparison.push_str(&format!(
-            r#"<tr><td>LinearERT:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+            r#"<tr><td>e-RTo:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
+            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
         "#, power, res.agnostic_power));
     }
 
     if let Some(res) = mad_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
         power_comparison.push_str(&format!(
-            r#"<tr><td>MAD-based:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
-            <tr><td>Agnostic (MAD):</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
+            r#"<tr><td>e-RTc:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">domain-aware sequential</td></tr>
+            <tr><td>e-RTu:</td><td><strong>{:.1}%</strong></td><td style="color:#7f8c8d">floor (universal)</td></tr>
         "#, power, res.agnostic_power));
     }
 
@@ -693,8 +693,8 @@ direction = sign(mean_trt - mean_ctrl) # from past data
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
         power_comparison.push_str(&format!(r#"
         <table>
-            <tr><td>LinearERT domain knowledge:</td><td>+{:.1}%</td></tr>
-            <tr><td>LinearERT sequential cost:</td><td>-{:.1}%</td></tr>
+            <tr><td>e-RTo domain knowledge:</td><td>+{:.1}%</td></tr>
+            <tr><td>e-RTo sequential cost:</td><td>-{:.1}%</td></tr>
         </table>
         "#, power - res.agnostic_power, t_test_power - power));
     }
@@ -749,7 +749,7 @@ direction = sign(mean_trt - mean_ctrl) # from past data
             <tr><td>Futility Watch:</td><td>{}</td></tr>
             <tr><td>Burn-in:</td><td>{}</td></tr>
             <tr><td>Ramp:</td><td>{}</td></tr>
-            <tr><td>c_max (MAD):</td><td>{}</td></tr>
+            <tr><td>c_max (e-RTc):</td><td>{}</td></tr>
             <tr><td>Seed:</td><td>{}</td></tr>
         </table>
 
@@ -968,8 +968,8 @@ pub fn run() {
 
     // Method selection
     let method_choice = get_choice("Select method:", &[
-        "LinearERT (bounded outcomes, e.g., VFD 0-28)",
-        "MAD-based (unbounded, matches paper)",
+        "e-RTo (ordinal/bounded, e.g., VFD 0-28)",
+        "e-RTc (continuous/unbounded)",
         "Both",
     ]);
 
@@ -1092,22 +1092,22 @@ pub fn run() {
 
     if let Some(ref res) = linear_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
-        println!("LinearERT:           {:.1}%  <- domain-aware sequential", power);
-        println!("Agnostic (universal):{:.1}%  <- floor (universal)", res.agnostic_power);
-        println!("\nLinearERT vs Agnostic: +{:.1}% (domain knowledge)", power - res.agnostic_power);
-        println!("LinearERT vs t-test:   -{:.1}% (sequential cost)", t_test_power - power);
+        println!("e-RTo:               {:.1}%  <- domain-aware sequential", power);
+        println!("e-RTu:               {:.1}%  <- floor (universal)", res.agnostic_power);
+        println!("\ne-RTo vs e-RTu:      +{:.1}% (domain knowledge)", power - res.agnostic_power);
+        println!("e-RTo vs t-test:     -{:.1}% (sequential cost)", t_test_power - power);
     }
 
     if let Some(ref res) = mad_results {
         let power = (res.success_count as f64 / n_sims as f64) * 100.0;
         if linear_results.is_some() {
-            println!("\nMAD-based:           {:.1}%", power);
-            println!("Agnostic (universal):{:.1}%", res.agnostic_power);
+            println!("\ne-RTc:               {:.1}%", power);
+            println!("e-RTu:               {:.1}%", res.agnostic_power);
         } else {
-            println!("MAD-based:           {:.1}%  <- domain-aware sequential", power);
-            println!("Agnostic (universal):{:.1}%  <- floor (universal)", res.agnostic_power);
-            println!("\nMAD vs Agnostic:     +{:.1}% (domain knowledge)", power - res.agnostic_power);
-            println!("MAD vs t-test:       -{:.1}% (sequential cost)", t_test_power - power);
+            println!("e-RTc:               {:.1}%  <- domain-aware sequential", power);
+            println!("e-RTu:               {:.1}%  <- floor (universal)", res.agnostic_power);
+            println!("\ne-RTc vs e-RTu:      +{:.1}% (domain knowledge)", power - res.agnostic_power);
+            println!("e-RTc vs t-test:     -{:.1}% (sequential cost)", t_test_power - power);
         }
     }
 
