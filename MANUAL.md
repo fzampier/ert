@@ -23,6 +23,50 @@ Sequential Randomization Tests using e-values (betting martingales).
 
 ---
 
+## Power Hierarchy
+
+Three layers of sequential testing, from most to least powerful:
+
+```
++-------------------------------------------------------------+
+|  TRADITIONAL (z-test, log-rank, t-test)                     |
+|  Fixed sample size. Maximum power. One-shot analysis.       |
+|                                                             |
+|                     | pay for sequential                    |
+|                     v                                       |
+|  DEDICATED (e-RT, e-RTo, e-RTs, e-RTms)                     |
+|  Sequential. Anytime-valid. Domain-aware betting.           |
+|  Uses domain knowledge (rates, means, hazards, transitions).|
+|                                                             |
+|                     | pay for agnosticism                   |
+|                     v                                       |
+|  UNIVERSAL (e-RTu)                                          |
+|  Sequential. Anytime-valid. Domain-blind.                   |
+|  Sees only: (arm, good/bad) signals. The floor.             |
++-------------------------------------------------------------+
+```
+
+**What each layer costs:**
+- Traditional -> Dedicated: ~10-20% power for sequential flexibility
+- Dedicated -> Universal: ~10-30% power for domain blindness
+
+**Example at N=500, 10% effect:**
+```
+Z-test (fixed):        80%   <- ceiling
+e-RT (dedicated):      72%   <- domain-aware sequential
+e-RTu (universal):     55%   <- floor
+```
+
+**Key insight:** Dedicated methods are essentially:
+`Universal core + domain-specific translator + optimized betting`
+
+The extra power comes from:
+1. Smarter signal definition (what counts as "good")
+2. Domain-aware betting calibration
+3. Using magnitude, not just direction
+
+---
+
 ## Core Formula: The e-Process
 
 All methods follow the same betting martingale structure:
