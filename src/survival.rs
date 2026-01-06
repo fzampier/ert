@@ -6,7 +6,6 @@ use std::fs::File;
 use std::io::{self, Write};
 
 use crate::ert_core::{get_input, get_input_usize, get_bool, get_optional_input, chrono_lite, normal_cdf};
-use crate::agnostic::{AgnosticERT, Signal, Arm};
 
 // === HELPERS ===
 
@@ -37,7 +36,6 @@ struct Trial {
     hr_at_stop: f64,
     hr_final: f64,
     min_wealth: f64,
-    agnostic_stopped: bool,
 }
 
 // === SIMULATE ===
@@ -71,11 +69,9 @@ fn simulate_trial<R: Rng + ?Sized>(
     SurvivalData { time, status, treatment }
 }
 
-// === e-SURVIVAL ===
+// === e-RTs ===
 
-fn compute_e_survival(
-    data: &SurvivalData, burn_in: usize, ramp: usize, lambda_max: f64,
-) -> Vec<f64> {
+fn compute_e_survival(data: &SurvivalData, burn_in: usize, ramp: usize, lambda_max: f64) -> Vec<f64> {
     let n = data.time.len();
     let mut indices: Vec<usize> = (0..n).collect();
     indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
@@ -114,55 +110,6 @@ fn compute_e_survival(
     wealth
 }
 
-// NOTE: e-RTu has low power for survival because it expects a binary good/bad
-// outcome per observation, but survival information is encoded in WHICH arm
-// has events (timing), not in a separate outcome quality. e-RTs uses the
-// score test signal directly and works well. This is a known limitation.
-fn compute_agnostic_survival(
-    data: &SurvivalData, burn_in: usize, ramp: usize, threshold: f64,
-) -> (bool, Option<usize>) {
-    let n = data.time.len();
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
-
-    let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
-    let (mut events_trt, mut events_ctrl) = (0usize, 0usize);
-    let (mut at_risk_trt, mut at_risk_ctrl) = (0usize, 0usize);
-
-    for i in 0..n {
-        if data.treatment[i] == 1 { at_risk_trt += 1; } else { at_risk_ctrl += 1; }
-    }
-
-    let mut event_num = 0;
-    for &idx in indices.iter() {
-        let is_event = data.status[idx] == 1;
-        let is_trt = data.treatment[idx] == 1;
-
-        if is_event {
-            event_num += 1;
-            if is_trt { events_trt += 1; } else { events_ctrl += 1; }
-
-            // Best available signal: is treatment beating expectation?
-            let total_at_risk = at_risk_trt + at_risk_ctrl;
-            let total_events = events_trt + events_ctrl;
-            if total_at_risk > 0 && total_events > 0 {
-                let expected_trt = total_events as f64 * at_risk_trt as f64 / total_at_risk as f64;
-                let good = (events_trt as f64) < expected_trt;
-
-                let signal = Signal {
-                    arm: if is_trt { Arm::Treatment } else { Arm::Control },
-                    good,
-                };
-                if agnostic.observe(signal) { return (true, Some(event_num)); }
-            }
-        }
-
-        if is_trt { at_risk_trt = at_risk_trt.saturating_sub(1); }
-        else { at_risk_ctrl = at_risk_ctrl.saturating_sub(1); }
-    }
-    (false, None)
-}
-
 fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 {
     let mut indices: Vec<usize> = (0..data.time.len()).collect();
     indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
@@ -189,8 +136,7 @@ fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 
 // === HTML REPORT ===
 
 fn build_report(
-    console: &str, n_pts: usize,
-    threshold: f64, fut_watch: f64,
+    console: &str, n_pts: usize, threshold: f64, fut_watch: f64,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64],
     trajs: &[Vec<f64>], stops: &[f64], min_wealths: &[f64],
     grid: &[(f64, usize, usize, f64)],
@@ -208,19 +154,16 @@ fn build_report(
         ));
     }
 
-    // ECDF for stops
     let mut sorted_stops = stops.to_vec();
     sorted_stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let ecdf_x: Vec<f64> = sorted_stops.clone();
     let ecdf_y: Vec<f64> = (1..=sorted_stops.len()).map(|i| i as f64 / sorted_stops.len() as f64).collect();
 
-    // ECDF for min wealth
     let mut sorted_mw = min_wealths.to_vec();
     sorted_mw.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mw_x: Vec<f64> = sorted_mw.clone();
     let mw_y: Vec<f64> = (1..=sorted_mw.len()).map(|i| i as f64 / sorted_mw.len() as f64).collect();
 
-    // Grid line plot
     let grid_th: Vec<f64> = grid.iter().map(|(th, _, _, _)| *th).collect();
     let grid_e: Vec<f64> = grid.iter().map(|(_, n_trig, n_e, _)| if *n_trig > 0 { (*n_e as f64 / *n_trig as f64) * 100.0 } else { 0.0 }).collect();
 
@@ -311,12 +254,11 @@ pub fn run() {
     let ramp: usize = 50;
     let lambda_max: f64 = 0.25;
 
-    // Console output capture
     let mut console = String::new();
     console.push_str(&format!("{}\n", chrono_lite()));
-    console.push_str(&format!("\n==========================================\n"));
-    console.push_str(&format!("   PARAMETERS\n"));
-    console.push_str(&format!("==========================================\n"));
+    console.push_str("\n==========================================\n");
+    console.push_str("   PARAMETERS\n");
+    console.push_str("==========================================\n");
     console.push_str(&format!("Target HR:   {:.2}\n", target_hr));
     console.push_str(&format!("N:           {}\n", n_pts));
     console.push_str(&format!("Simulations: {}\n", n_sims));
@@ -366,8 +308,6 @@ pub fn run() {
         let data = simulate_trial(&mut *rng, n_pts, target_hr, shape, scale, cens_prop);
         let wealth = compute_e_survival(&data, burn_in, ramp, lambda_max);
 
-        let (agn_stopped, _) = compute_agnostic_survival(&data, burn_in, ramp, threshold);
-
         let mut stop_n: Option<usize> = None;
         let mut hr_at_stop = 1.0;
         let mut min_wealth = 1.0f64;
@@ -380,7 +320,6 @@ pub fn run() {
             }
         }
 
-        // Track at steps
         let is_sample = sample_indices.contains(&sim);
         for (step_idx, &s) in steps.iter().enumerate() {
             if s < wealth.len() {
@@ -393,7 +332,7 @@ pub fn run() {
         }
 
         let hr_final = calculate_observed_hr(&data, None);
-        trials.push(Trial { stop_n, hr_at_stop, hr_final, min_wealth, agnostic_stopped: agn_stopped });
+        trials.push(Trial { stop_n, hr_at_stop, hr_final, min_wealth });
     }
     println!(" done");
 
@@ -413,7 +352,6 @@ pub fn run() {
     // Statistics
     let successes: Vec<&Trial> = trials.iter().filter(|t| t.stop_n.is_some()).collect();
     let power = (successes.len() as f64 / n_sims as f64) * 100.0;
-    let agn_power = (trials.iter().filter(|t| t.agnostic_stopped).count() as f64 / n_sims as f64) * 100.0;
 
     let expected_events = (n_pts as f64 * (1.0 - cens_prop)).round() as usize;
     let lr_power = log_rank_power(target_hr, expected_events, 1.0/threshold) * 100.0;
@@ -441,24 +379,23 @@ pub fn run() {
     }
 
     // Console output
-    console.push_str(&format!("\n==========================================\n"));
-    console.push_str(&format!("   RESULTS\n"));
-    console.push_str(&format!("==========================================\n"));
+    console.push_str("\n==========================================\n");
+    console.push_str("   RESULTS\n");
+    console.push_str("==========================================\n");
     console.push_str(&format!("Type I Error:  {:.2}%\n", type1));
     console.push_str(&format!("\n--- Power at N={} (~{} events) ---\n", n_pts, expected_events));
     console.push_str(&format!("Log-rank:  {:.1}%\n", lr_power));
     console.push_str(&format!("e-RTs:     {:.1}%\n", power));
-    console.push_str(&format!("e-RTu:     {:.1}%\n", agn_power));
 
     if !successes.is_empty() {
-        console.push_str(&format!("\n--- Stopping ---\n"));
+        console.push_str("\n--- Stopping ---\n");
         console.push_str(&format!("Avg stop:      {:.0} ({:.0}%)\n", avg_stop, avg_stop / n_pts as f64 * 100.0));
         console.push_str(&format!("HR @ stop:     {:.3}\n", avg_hr_stop));
         console.push_str(&format!("HR @ end:      {:.3}\n", avg_hr_final));
         console.push_str(&format!("Type M:        {:.2}x\n", type_m));
     }
 
-    console.push_str(&format!("\n--- Futility Grid ---\n"));
+    console.push_str("\n--- Futility Grid ---\n");
     console.push_str(&format!("{:<10} {:>10} {:>10} {:>10}\n", "Threshold", "Triggered", "e-RTs+", "Avg HR"));
     for (th, n_trig, n_e, sum_hr) in &grid {
         if *n_trig > 0 {
@@ -471,7 +408,6 @@ pub fn run() {
 
     print!("{}", console);
 
-    // Generate report
     println!("\nGenerating report...");
     let stops: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
     let min_wealths: Vec<f64> = trials.iter().map(|t| t.min_wealth).collect();
