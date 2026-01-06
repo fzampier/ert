@@ -4,9 +4,7 @@ Sequential Randomization Tests using e-values (betting martingales).
 
 ## What is this?
 
-`ert` implements anytime-valid inference for randomized clinical trials. Unlike traditional p-values that require fixed sample sizes, e-values allow continuous monitoring with strict Type I error control.
-
-**Key property:** You can stop the trial whenever the e-value crosses the threshold - no alpha spending, no adjustment needed.
+`ert` implements anytime-valid inference for randomized clinical trials. Unlike traditional p-values that require fixed sample sizes, e-values allow continuous monitoring with strict Type I error control. It is based on the framework defined by Ramdas and collaborators.
 
 ## Features
 
