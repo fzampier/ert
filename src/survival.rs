@@ -114,6 +114,10 @@ fn compute_e_survival(
     wealth
 }
 
+// NOTE: e-RTu has low power for survival because it expects a binary good/bad
+// outcome per observation, but survival information is encoded in WHICH arm
+// has events (timing), not in a separate outcome quality. e-RTs uses the
+// score test signal directly and works well. This is a known limitation.
 fn compute_agnostic_survival(
     data: &SurvivalData, burn_in: usize, ramp: usize, threshold: f64,
 ) -> (bool, Option<usize>) {
@@ -122,15 +126,39 @@ fn compute_agnostic_survival(
     indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
 
     let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
+    let (mut events_trt, mut events_ctrl) = (0usize, 0usize);
+    let (mut at_risk_trt, mut at_risk_ctrl) = (0usize, 0usize);
 
-    for (i, &idx) in indices.iter().enumerate() {
+    for i in 0..n {
+        if data.treatment[i] == 1 { at_risk_trt += 1; } else { at_risk_ctrl += 1; }
+    }
+
+    let mut event_num = 0;
+    for &idx in indices.iter() {
         let is_event = data.status[idx] == 1;
         let is_trt = data.treatment[idx] == 1;
-        let signal = Signal {
-            arm: if is_trt { Arm::Treatment } else { Arm::Control },
-            good: !is_event,
-        };
-        if agnostic.observe(signal) { return (true, Some(i + 1)); }
+
+        if is_event {
+            event_num += 1;
+            if is_trt { events_trt += 1; } else { events_ctrl += 1; }
+
+            // Best available signal: is treatment beating expectation?
+            let total_at_risk = at_risk_trt + at_risk_ctrl;
+            let total_events = events_trt + events_ctrl;
+            if total_at_risk > 0 && total_events > 0 {
+                let expected_trt = total_events as f64 * at_risk_trt as f64 / total_at_risk as f64;
+                let good = (events_trt as f64) < expected_trt;
+
+                let signal = Signal {
+                    arm: if is_trt { Arm::Treatment } else { Arm::Control },
+                    good,
+                };
+                if agnostic.observe(signal) { return (true, Some(event_num)); }
+            }
+        }
+
+        if is_trt { at_risk_trt = at_risk_trt.saturating_sub(1); }
+        else { at_risk_ctrl = at_risk_ctrl.saturating_sub(1); }
     }
     (false, None)
 }
