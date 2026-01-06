@@ -4,6 +4,7 @@ use rand::rngs::StdRng;
 use rand::RngCore;
 use std::io::{self, Write};
 use std::fs::File;
+use crate::agnostic::{AgnosticERT, Signal, Arm};
 
 // === HELPERS ===
 
@@ -331,7 +332,7 @@ fn is_good_transition(from: usize, to: usize) -> bool {
 fn run_single_trial<R: Rng + ?Sized>(
     rng: &mut R, n_patients: usize, p_ctrl: &TransitionMatrix, p_trt: &TransitionMatrix,
     max_days: usize, start_state: usize, burn_in: usize, ramp: usize, threshold: f64,
-) -> (TrialResult, Vec<f64>) {
+) -> (TrialResult, Vec<f64>, Vec<Transition>) {
     let mut all_transitions: Vec<Transition> = Vec::new();
 
     for _ in 0..n_patients {
@@ -342,7 +343,7 @@ fn run_single_trial<R: Rng + ?Sized>(
     }
 
     if all_transitions.len() < burn_in {
-        return (TrialResult { stopped_at: None, success: false, effect_at_stop: None, effect_at_final: 0.0 }, vec![1.0]);
+        return (TrialResult { stopped_at: None, success: false, effect_at_stop: None, effect_at_final: 0.0 }, vec![1.0], all_transitions);
     }
 
     // Compute wealth and track effect sizes at each point
@@ -357,7 +358,7 @@ fn run_single_trial<R: Rng + ?Sized>(
         success: crossing.is_some(),
         effect_at_stop,
         effect_at_final,
-    }, wealth)
+    }, wealth, all_transitions)
 }
 
 /// Compute e-value wealth AND track effect size (good rate diff) at each step
@@ -405,6 +406,32 @@ fn compute_e_rtms_with_effects(transitions: &[Transition], burn_in: usize, ramp:
     (wealth, effects)
 }
 
+/// Compute agnostic e-RT for multistate transitions
+/// Signal: good = is_good_transition, arm = treatment/control
+fn compute_agnostic_multistate(
+    transitions: &[Transition],
+    burn_in: usize,
+    ramp: usize,
+    threshold: f64,
+) -> (bool, Option<usize>) {
+    let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
+
+    for (i, trans) in transitions.iter().enumerate() {
+        let is_good = is_good_transition(trans.from, trans.to);
+        let is_trt = trans.arm == 1;
+
+        let signal = Signal {
+            arm: if is_trt { Arm::Treatment } else { Arm::Control },
+            good: is_good,
+        };
+
+        if agnostic.observe(signal) {
+            return (true, Some(i + 1));
+        }
+    }
+    (false, None)
+}
+
 // === SIMULATION RUNNER ===
 
 struct SimResults {
@@ -418,6 +445,9 @@ struct SimResults {
     avg_effect_at_stop: f64,
     avg_effect_at_final: f64,
     type_m_error: f64,
+    // Agnostic tracking
+    agnostic_successes: usize,
+    agnostic_stop_times: Vec<f64>,
 }
 
 fn run_simulation<R: Rng + ?Sized>(
@@ -433,10 +463,14 @@ fn run_simulation<R: Rng + ?Sized>(
     let mut effects_at_stop: Vec<f64> = Vec::new();
     let mut effects_at_final: Vec<f64> = Vec::new();
 
+    // Agnostic tracking
+    let mut agnostic_successes = 0;
+    let mut agnostic_stop_times: Vec<f64> = Vec::new();
+
     let p_actual = if is_null { p_ctrl } else { p_trt };
 
     for sim in 0..n_sims {
-        let (result, wealth) = run_single_trial(rng, n_patients, p_ctrl, p_actual, max_days, start_state, burn_in, ramp, threshold);
+        let (result, wealth, transitions) = run_single_trial(rng, n_patients, p_ctrl, p_actual, max_days, start_state, burn_in, ramp, threshold);
         trans_counts.push(wealth.len() as f64);
 
         if result.success {
@@ -446,6 +480,15 @@ fn run_simulation<R: Rng + ?Sized>(
             if let Some(eff_stop) = result.effect_at_stop {
                 effects_at_stop.push(eff_stop);
                 effects_at_final.push(result.effect_at_final);
+            }
+        }
+
+        // Run agnostic on same transitions
+        let (agn_success, agn_stop) = compute_agnostic_multistate(&transitions, burn_in, ramp, threshold);
+        if agn_success {
+            agnostic_successes += 1;
+            if let Some(stop) = agn_stop {
+                agnostic_stop_times.push(stop as f64);
             }
         }
 
@@ -471,6 +514,7 @@ fn run_simulation<R: Rng + ?Sized>(
     SimResults {
         type1_error, success_count, avg_stop_trans, median_transitions, trajectories, stop_times,
         avg_effect_at_stop, avg_effect_at_final, type_m_error,
+        agnostic_successes, agnostic_stop_times,
     }
 }
 
@@ -484,7 +528,8 @@ fn compute_day28<R: Rng + ?Sized>(rng: &mut R, p: &TransitionMatrix, n: usize, m
 // === HTML REPORT ===
 
 fn build_html(n_patients: usize, n_sims: usize, threshold: f64, null: &SimResults, alt: &SimResults,
-              d28_c: [f64; 4], d28_t: [f64; 4], bench: &PropOddsBenchmark, ert_power: f64) -> String {
+              d28_c: [f64; 4], d28_t: [f64; 4], bench: &PropOddsBenchmark, ert_power: f64,
+              agnostic_power: f64, agnostic_null_rate: f64) -> String {
 
     let power_diff = ert_power - bench.power_at_n * 100.0;
     let verdict = if power_diff.abs() < 2.0 {
@@ -572,6 +617,17 @@ th{{background:#f1f3f4}}
 <tr class="hl"><td>Type M ratio:</td><td>{:.2}x</td></tr>
 </table>
 
+<h2>Power Comparison (Three-Tier Hierarchy)</h2>
+<table>
+<tr style="background:#e8f8e8;"><td>Prop. Odds (fixed sample):</td><td><strong>{:.1}%</strong></td><td>← ceiling (traditional)</td></tr>
+<tr style="background:#fff8e8;"><td>e-RTms (sequential):</td><td><strong>{:.1}%</strong></td><td>← domain-aware sequential</td></tr>
+<tr style="background:#f8e8e8;"><td>Agnostic (universal):</td><td><strong>{:.1}%</strong></td><td>← floor (universal)</td></tr>
+<tr><td>Domain knowledge value:</td><td>{:+.1}%</td><td>(e-RTms − agnostic)</td></tr>
+<tr><td>Sequential cost:</td><td>−{:.1}%</td><td>(PO − e-RTms)</td></tr>
+<tr><td>Agnostic Type I error:</td><td>{:.2}%</td><td></td></tr>
+</table>
+<p><em>The hierarchy shows: Traditional fixed-sample test sets the ceiling, domain-aware sequential captures part of it, and agnostic provides the floor.</em></p>
+
 <h2>e-Value Trajectories</h2>
 <div id="p1" style="height:400px"></div>
 <div id="p2" style="height:400px"></div>
@@ -610,6 +666,13 @@ Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{co
         bench.power_at_n * 100.0, n_patients,
         verdict, null.type1_error, alt.median_transitions, alt.avg_stop_trans,
         alt.avg_effect_at_stop, alt.avg_effect_at_final, alt.type_m_error,
+        // Power comparison section
+        bench.power_at_n * 100.0,  // PO ceiling
+        ert_power,                  // e-RTms middle
+        agnostic_power,             // Agnostic floor
+        ert_power - agnostic_power, // Domain knowledge value
+        bench.power_at_n * 100.0 - ert_power, // Sequential cost
+        agnostic_null_rate,         // Agnostic Type I
         null.trajectories, alt.trajectories, alt.stop_times, threshold)
 }
 
@@ -681,7 +744,19 @@ pub fn run() {
     println!("\n--- Alternative ---");
     let alt = run_simulation(&mut *rng, n_patients, n_sims, &p_ctrl, &p_trt, max_days, start, burn_in, ramp, threshold, false);
     let ert_power = (alt.success_count as f64 / n_sims as f64) * 100.0;
-    println!("Power: {:.1}%", ert_power);
+    let agnostic_power = (alt.agnostic_successes as f64 / n_sims as f64) * 100.0;
+    let agnostic_null_rate = (null.agnostic_successes as f64 / n_sims as f64) * 100.0;
+    println!("e-RTms Power:    {:.1}%", ert_power);
+    println!("Agnostic Power:  {:.1}%", agnostic_power);
+    println!("Agnostic Type I: {:.2}%", agnostic_null_rate);
+
+    // Three-tier power comparison
+    println!("\n--- Power Comparison (Three-Tier Hierarchy) ---");
+    println!("Prop. Odds (fixed):  {:.1}%  <- ceiling (traditional)", benchmark.power_at_n * 100.0);
+    println!("e-RTms (sequential): {:.1}%  <- domain-aware sequential", ert_power);
+    println!("Agnostic (universal):{:.1}%  <- floor (universal)", agnostic_power);
+    println!("\nDomain knowledge:    {:+.1}%", ert_power - agnostic_power);
+    println!("Sequential cost:     -{:.1}%", benchmark.power_at_n * 100.0 - ert_power);
 
     // Type M error
     println!("\n--- Type M Error (Magnification) ---");
@@ -689,28 +764,7 @@ pub fn run() {
     println!("Effect at final: {:.3}", alt.avg_effect_at_final);
     println!("Type M ratio:    {:.2}x", alt.type_m_error);
 
-    // === HEAD-TO-HEAD COMPARISON ===
-    println!("\n==========================================");
-    println!("   COMPARISON: e-RTms vs Proportional Odds");
-    println!("==========================================");
-    println!("\n  Metric              e-RTms     Prop. Odds");
-    println!("  ─────────────────────────────────────────");
-    println!("  Power at N={}:    {:.1}%       {:.1}%", n_patients, ert_power, benchmark.power_at_n * 100.0);
-    println!("  N for 80% power:   ~{}        {}",
-        estimate_n_for_power(&mut *rng, 0.80, &p_ctrl, &p_trt, max_days, start, burn_in, ramp, threshold, n_patients),
-        benchmark.n_for_80);
-
-    let power_diff = ert_power - benchmark.power_at_n * 100.0;
-    if power_diff.abs() < 2.0 {
-        println!("\n  Verdict: Comparable power (~{:.0}% difference)", power_diff.abs());
-    } else if power_diff > 0.0 {
-        println!("\n  Verdict: e-RTms has {:.1}% MORE power", power_diff);
-    } else {
-        println!("\n  Verdict: Prop. Odds has {:.1}% MORE power", -power_diff);
-    }
-    println!("  (e-RTms allows early stopping; PO is fixed-sample)");
-
-    let html = build_html(n_patients, n_sims, threshold, &null, &alt, d28_c, d28_t, &benchmark, ert_power);
+    let html = build_html(n_patients, n_sims, threshold, &null, &alt, d28_c, d28_t, &benchmark, ert_power, agnostic_power, agnostic_null_rate);
     File::create("multistate_report.html").unwrap().write_all(html.as_bytes()).unwrap();
     println!("\n>> Saved: multistate_report.html");
 }
