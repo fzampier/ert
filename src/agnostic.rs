@@ -306,24 +306,31 @@ fn build_html(
 ) -> String {
     format!(
         r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>e-RTu Universal</title>
-<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-<style>body{{font-family:monospace;max-width:1200px;margin:0 auto;padding:20px}}pre{{background:#f5f5f5;padding:10px}}</style>
-</head><body>
-<h1>e-RTu Universal</h1>
-<pre>
-{}
-Type I: {:.2}%  |  Power: {:.1}%
-</pre>
-<div id="p1" style="height:400px"></div>
-<div id="p2" style="height:400px"></div>
+<html><head><meta charset="utf-8"><title>e-RTu Universal Report</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;max-width:1400px;margin:0 auto;padding:20px;background:#fafafa}}
+h1{{color:#1a1a2e}}h2,h3{{color:#16213e}}
+pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overflow-x:auto;font-size:13px}}
+.plot-container{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}}
+.plot{{background:#fff;border-radius:8px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+</style></head><body>
+<h1>e-RTu Universal Report</h1>
+<h2>Console Output</h2>
+<pre>{}
+Type I: {:.2}%  |  Power: {:.1}%</pre>
+<h2>Visualizations</h2>
+<div class="plot-container">
+<div class="plot"><div id="p1" style="height:350px"></div></div>
+<div class="plot"><div id="p2" style="height:350px"></div></div>
+</div>
 <script>
 var t_null={:?};var t_alt={:?};var threshold={};
 Plotly.newPlot('p1',t_null.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(150,150,150,0.4)'}},showlegend:false}})),{{
-  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
+  title:'Null Hypothesis',yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
   shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(155,89,182,0.5)'}},showlegend:false}})),{{
-  yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
+  title:'Alternative Hypothesis',yaxis:{{type:'log',title:'e-value',range:[-1,Math.log10(threshold)+1]}},xaxis:{{title:'Signal'}},
   shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 </script></body></html>"#,
         chrono_lite(), null.rejection_rate * 100.0, alt.rejection_rate * 100.0,

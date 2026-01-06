@@ -7,7 +7,7 @@ use std::fs::File;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
-    calculate_n_binary, chrono_lite, BinaryERTProcess, z_test_power_binary,
+    calculate_n_binary, BinaryERTProcess, z_test_power_binary,
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
@@ -320,7 +320,6 @@ fn build_report(
     stops: &[f64], grid: &[(f64, usize, usize, usize, f64)], n_sims: usize,
     mc_count: usize, mc_ratio: f64, mc_ratios: &[f64],
 ) -> String {
-    let ts = chrono_lite();
     let x_js = format!("{:?}", x);
 
     // Sample trajectories
@@ -369,21 +368,28 @@ fn build_report(
         format!("MC @ {:.1}: {} triggered, median ratio {:.2}x\n", fut_watch, mc_count, mc_ratio)
     } else { String::new() };
 
-    format!(r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>e-RT Binary</title>
-<script src="https://cdn.plot.ly/plotly-2.12.1.min.js"></script>
-<style>body{{font-family:monospace;max-width:1100px;margin:0 auto;padding:20px}}pre{{background:#f4f4f4;padding:12px;overflow-x:auto}}</style>
-</head><body>
-<h1>e-RT Binary</h1><p>{}</p>
-<h2>Results</h2><pre>{}</pre>
-<h2>Trajectories</h2>
-<div id="p1" style="height:380px"></div>
-<div id="p2" style="height:380px"></div>
-<h2>Stopping (ECDF)</h2>
-<div id="p3" style="height:280px"></div>
-<h2>Futility</h2>
+    format!(r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>e-RT Binary Report</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;max-width:1400px;margin:0 auto;padding:20px;background:#fafafa}}
+h1{{color:#1a1a2e}}h2,h3{{color:#16213e}}
+pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overflow-x:auto;font-size:13px}}
+.plot-container{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}}
+.plot{{background:#fff;border-radius:8px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+</style></head><body>
+<h1>e-RT Binary Report</h1>
+<h2>Console Output</h2>
+<pre>{}</pre>
+<h2>Visualizations</h2>
+<div class="plot-container">
+<div class="plot"><div id="p1" style="height:350px"></div></div>
+<div class="plot"><div id="p2" style="height:350px"></div></div>
+<div class="plot"><div id="p3" style="height:350px"></div></div>
+<div class="plot"><div id="p4" style="height:350px"></div></div>
+{}</div>
+<h2>Futility Grid</h2>
 <pre>{}{}</pre>
-<div id="p4" style="height:280px"></div>
-{}
 <script>
 Plotly.newPlot('p1',[
   {{type:'scatter',x:{},y:{:?},line:{{width:0}},showlegend:false}},
@@ -401,7 +407,7 @@ Plotly.newPlot('p4',[
 ],{{xaxis:{{title:'Threshold'}},yaxis:{{title:'%',range:[0,100]}}}});
 {}
 </script></body></html>"#,
-        ts, console, mc_txt, grid_tbl, mc_div,
+        console, mc_div, mc_txt, grid_tbl,
         x_js, y_lo, x_js, y_hi, x_js, y_med, threshold, threshold,
         traces, n_pts, threshold, threshold, n_pts, fut_watch, fut_watch,
         stop_x, stop_y, g_th, g_z, g_th, g_e, mc_plot
