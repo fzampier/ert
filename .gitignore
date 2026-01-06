@@ -1,1 +1,8 @@
 /target
+*.html
+*.csv
+*.log
+*.tex
+*.pdf
+.DS_Store
+.Rhistory

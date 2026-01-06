@@ -2,6 +2,12 @@
 name = "ert"
 version = "0.1.0"
 edition = "2021"
+description = "Sequential Randomization Tests using e-values (betting martingales)"
+license = "MIT"
+authors = ["Fernando Gonzalez Zapata"]
+repository = "https://github.com/fgz/ert"
+keywords = ["statistics", "clinical-trials", "e-values", "sequential-analysis"]
+categories = ["science", "command-line-utilities"]
 
 [dependencies]
 rand = "0.8"
