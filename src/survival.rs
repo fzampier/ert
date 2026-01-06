@@ -496,7 +496,9 @@ pub fn run() {
             }
         }
 
-        trajectories.push(wealth.clone());
+        if trajectories.len() < 100 {
+            trajectories.push(wealth.clone());
+        }
 
         let mut stopped = false;
         let mut stop_step = None;
