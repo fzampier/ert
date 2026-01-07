@@ -6,6 +6,7 @@ mod multistate;
 mod agnostic;
 mod analyze_binary;
 mod analyze_continuous;
+mod analyze_survival;
 mod compare_methods;
 
 use std::env;
@@ -53,6 +54,19 @@ fn run_cli(args: &[String]) {
             let opts = parse_analyze_options(&args[2..]);
 
             if let Err(e) = analyze_binary::run_cli(csv_path, &opts) {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "analyze-survival" | "as" => {
+            if args.len() < 2 {
+                eprintln!("Error: CSV file required");
+                eprintln!("Usage: ert analyze-survival <file.csv> [options]");
+                return;
+            }
+            let csv_path = &args[1];
+            let opts = parse_analyze_options(&args[2..]);
+
+            if let Err(e) = analyze_survival::run_cli(csv_path, &opts) {
                 eprintln!("Error: {}", e);
             }
         }
@@ -144,23 +158,29 @@ fn print_usage() {
     println!("e-RT: Sequential Randomization Tests");
     println!();
     println!("USAGE:");
-    println!("  ert                          Interactive mode");
-    println!("  ert analyze <file.csv>       Analyze continuous trial data");
-    println!("  ert analyze-binary <file.csv> Analyze binary trial data");
+    println!("  ert                              Interactive mode");
+    println!("  ert analyze <file.csv>           Analyze continuous trial data");
+    println!("  ert analyze-binary <file.csv>    Analyze binary trial data");
+    println!("  ert analyze-survival <file.csv>  Analyze survival trial data");
     println!();
     println!("OPTIONS:");
     println!("  -m, --method <rto|rtc>   Method (default: rtc)");
     println!("  -t, --threshold <N>      Success threshold (default: 20)");
-    println!("  -b, --burn-in <N>        Burn-in period (default: 50)");
-    println!("  -r, --ramp <N>           Ramp period (default: 100)");
+    println!("  -b, --burn-in <N>        Burn-in period (default: 50/30)");
+    println!("  -r, --ramp <N>           Ramp period (default: 100/50)");
     println!("  --min <N>                Min bound (e-RTo only)");
     println!("  --max <N>                Max bound (e-RTo only)");
     println!("  --no-report              Skip HTML report generation");
     println!();
+    println!("CSV FORMAT:");
+    println!("  continuous: treatment,outcome");
+    println!("  binary:     treatment,outcome (0/1)");
+    println!("  survival:   treatment,time,status (status: 1=event, 0=censored)");
+    println!();
     println!("EXAMPLES:");
-    println!("  ert analyze trial.csv");
-    println!("  ert analyze trial.csv --method rtc --threshold 20");
+    println!("  ert analyze trial.csv --method rtc");
     println!("  ert analyze-binary mortality.csv --threshold 20");
+    println!("  ert analyze-survival os_data.csv --burn-in 30");
 }
 
 fn run_interactive() {
@@ -175,8 +195,9 @@ fn run_interactive() {
     println!("  5. e-RTu  (universal/agnostic)");
     println!("  6. Analyze Binary Trial (CSV)");
     println!("  7. Analyze Continuous Trial (CSV)");
-    println!("  8. Compare e-RTo vs e-RTc");
-    println!("  9. Exit");
+    println!("  8. Analyze Survival Trial (CSV)");
+    println!("  9. Compare e-RTo vs e-RTc");
+    println!("  0. Exit");
 
     print!("\nSelect: ");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
@@ -200,8 +221,13 @@ fn run_interactive() {
                 eprintln!("Error: {}", e);
             }
         }
-        "8" => compare_methods::run(),
-        "9" => println!("Goodbye!"),
+        "8" => {
+            if let Err(e) = analyze_survival::run() {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "9" => compare_methods::run(),
+        "0" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }
 }
