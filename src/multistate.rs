@@ -162,6 +162,9 @@ struct Trial {
     n_bad_trt: usize,
     n_good_ctrl: usize,
     n_bad_ctrl: usize,
+    // For Markov LRT
+    trt_counts: Vec<Vec<usize>>,
+    ctrl_counts: Vec<Vec<usize>>,
 }
 
 // === PROPORTIONAL ODDS BENCHMARK ===
@@ -231,6 +234,100 @@ fn proportional_odds_sample_size(or: f64, n_states: usize, power: f64, alpha: f6
     (n.ceil() as usize).max(10)
 }
 
+// === MARKOV MODEL BENCHMARK ===
+
+/// Count transitions by arm into n_states x n_states matrices
+fn count_transitions(transitions: &[Transition], n_states: usize) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let mut trt = vec![vec![0usize; n_states]; n_states];
+    let mut ctrl = vec![vec![0usize; n_states]; n_states];
+
+    for t in transitions {
+        if t.arm == 1 {
+            trt[t.from][t.to] += 1;
+        } else {
+            ctrl[t.from][t.to] += 1;
+        }
+    }
+    (trt, ctrl)
+}
+
+/// Log-likelihood of observed transitions given transition probability matrix
+fn markov_log_likelihood(counts: &[Vec<usize>], probs: &[Vec<f64>]) -> f64 {
+    let mut ll = 0.0;
+    for from in 0..counts.len() {
+        for to in 0..counts[from].len() {
+            let n = counts[from][to];
+            if n > 0 && probs[from][to] > 0.0 {
+                ll += n as f64 * probs[from][to].ln();
+            }
+        }
+    }
+    ll
+}
+
+/// Estimate transition probabilities from counts (MLE)
+fn estimate_transition_probs(counts: &[Vec<usize>]) -> Vec<Vec<f64>> {
+    let n_states = counts.len();
+    let mut probs = vec![vec![0.0; n_states]; n_states];
+
+    for from in 0..n_states {
+        let row_sum: usize = counts[from].iter().sum();
+        if row_sum > 0 {
+            for to in 0..n_states {
+                probs[from][to] = counts[from][to] as f64 / row_sum as f64;
+            }
+        }
+    }
+    probs
+}
+
+/// Likelihood ratio test for Markov transition differences
+/// Returns (chi2_statistic, p_value, df)
+fn markov_lrt(trt_counts: &[Vec<usize>], ctrl_counts: &[Vec<usize>], absorbing: &[usize]) -> (f64, f64, usize) {
+    let n_states = trt_counts.len();
+
+    // Pool counts for null hypothesis
+    let mut pooled = vec![vec![0usize; n_states]; n_states];
+    for from in 0..n_states {
+        for to in 0..n_states {
+            pooled[from][to] = trt_counts[from][to] + ctrl_counts[from][to];
+        }
+    }
+
+    // Estimate probabilities
+    let p_pooled = estimate_transition_probs(&pooled);
+    let p_trt = estimate_transition_probs(trt_counts);
+    let p_ctrl = estimate_transition_probs(ctrl_counts);
+
+    // Log-likelihoods
+    let ll_null = markov_log_likelihood(trt_counts, &p_pooled)
+                + markov_log_likelihood(ctrl_counts, &p_pooled);
+    let ll_alt = markov_log_likelihood(trt_counts, &p_trt)
+               + markov_log_likelihood(ctrl_counts, &p_ctrl);
+
+    // LRT statistic: -2 * (ll_null - ll_alt)
+    let chi2 = -2.0 * (ll_null - ll_alt);
+    let chi2 = chi2.max(0.0); // Numerical safety
+
+    // Degrees of freedom: (non-absorbing rows) * (n_states - 1) for the difference
+    let n_non_absorbing = (0..n_states).filter(|s| !absorbing.contains(s)).count();
+    let df = n_non_absorbing * (n_states - 1);
+
+    // P-value from chi-squared distribution
+    let p_value = if df > 0 { 1.0 - chi2_cdf(chi2, df) } else { 1.0 };
+
+    (chi2, p_value, df)
+}
+
+/// Chi-squared CDF approximation (Wilson-Hilferty)
+fn chi2_cdf(x: f64, df: usize) -> f64 {
+    if df == 0 { return 1.0; }
+    let k = df as f64;
+    // Wilson-Hilferty transformation to normal
+    let z = ((x / k).powf(1.0/3.0) - (1.0 - 2.0/(9.0*k))) / (2.0/(9.0*k)).sqrt();
+    normal_cdf(z)
+}
+
 // === SIMULATION ===
 
 fn simulate_patient<R: Rng + ?Sized>(
@@ -271,6 +368,9 @@ fn run_single_trial<R: Rng + ?Sized>(
         all_transitions.extend(simulate_patient(rng, p, config, arm));
     }
 
+    let n_states = config.n_states();
+    let (trt_counts, ctrl_counts) = count_transitions(&all_transitions, n_states);
+
     if all_transitions.len() < burn_in {
         return (Trial {
             stop_n: None,
@@ -280,6 +380,7 @@ fn run_single_trial<R: Rng + ?Sized>(
             min_wealth: 1.0,
             n_transitions: all_transitions.len(),
             n_good_trt: 0, n_bad_trt: 0, n_good_ctrl: 0, n_bad_ctrl: 0,
+            trt_counts, ctrl_counts,
         }, vec![1.0]);
     }
 
@@ -345,6 +446,7 @@ fn run_single_trial<R: Rng + ?Sized>(
         n_transitions: n,
         n_good_trt: cnt_good_trt, n_bad_trt: cnt_bad_trt,
         n_good_ctrl: cnt_good_ctrl, n_bad_ctrl: cnt_bad_ctrl,
+        trt_counts, ctrl_counts,
     }, wealth)
 }
 
@@ -547,6 +649,20 @@ pub fn run() {
     let power_ert = 100.0 * alt_ert_success as f64 / n_sims as f64;
     let power_agn = 100.0 * alt_agn_success as f64 / n_sims as f64;
 
+    // Markov LRT power (fairer benchmark - tests transition rate differences)
+    let null_markov_reject = null_trials.iter()
+        .filter(|t| {
+            let (_, p, _) = markov_lrt(&t.trt_counts, &t.ctrl_counts, &config.absorbing);
+            p < 0.05
+        }).count();
+    let alt_markov_success = alt_trials.iter()
+        .filter(|t| {
+            let (_, p, _) = markov_lrt(&t.trt_counts, &t.ctrl_counts, &config.absorbing);
+            p < 0.05
+        }).count();
+    let type1_markov = 100.0 * null_markov_reject as f64 / n_sims as f64;
+    let power_markov = 100.0 * alt_markov_success as f64 / n_sims as f64;
+
     // Type M
     let effects_at_stop: Vec<f64> = alt_trials.iter().filter(|t| t.stop_n.is_some()).map(|t| t.effect_at_stop).collect();
     let effects_final: Vec<f64> = alt_trials.iter().filter(|t| t.stop_n.is_some()).map(|t| t.effect_final).collect();
@@ -603,10 +719,15 @@ pub fn run() {
     console.push_str(&format!("PO Power at N={}:  {:.1}%\n", n_patients, po_power * 100.0));
     console.push_str(&format!("PO N for 80%/90%:    {}/{}\n\n", n_80, n_90));
 
+    console.push_str("--- Markov LRT Benchmark ---\n");
+    console.push_str("(Tests transition rate differences - fairer comparison for e-RTms)\n");
+    console.push_str(&format!("Markov LRT Power: {:.1}%  (Type I: {:.2}%)\n\n", power_markov, type1_markov));
+
     console.push_str(&format!("--- Power at N={} ---\n", n_patients));
-    console.push_str(&format!("Prop Odds:  {:.1}%\n", po_power * 100.0));
-    console.push_str(&format!("e-RTms:     {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
-    console.push_str(&format!("e-RTu:      {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
+    console.push_str(&format!("Prop Odds:   {:.1}%\n", po_power * 100.0));
+    console.push_str(&format!("Markov LRT:  {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
+    console.push_str(&format!("e-RTms:      {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
+    console.push_str(&format!("e-RTu:       {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
 
     console.push_str("--- Type M Error ---\n");
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));
