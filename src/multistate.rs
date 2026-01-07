@@ -151,9 +151,8 @@ struct Transition {
 }
 
 struct Trial {
-    stop_n: Option<usize>,           // Current strategy: all transitions
-    agnostic_stop_n: Option<usize>,  // AgnosticERT
-    start_only_stop_n: Option<usize>, // Strategy 2: only transitions from start state
+    stop_n: Option<usize>,
+    agnostic_stop_n: Option<usize>,
     effect_at_stop: f64,
     effect_final: f64,
     min_wealth: f64,
@@ -376,7 +375,6 @@ fn run_single_trial<R: Rng + ?Sized>(
         return (Trial {
             stop_n: None,
             agnostic_stop_n: None,
-            start_only_stop_n: None,
             effect_at_stop: 0.0,
             effect_final: 0.0,
             min_wealth: 1.0,
@@ -443,53 +441,8 @@ fn run_single_trial<R: Rng + ?Sized>(
         }
     }
 
-    // Strategy 2: Start-only betting (only bet on transitions FROM start state)
-    // This filters out bounce noise from non-absorbing states
-    let start_state = config.start_state;
-    let start_only_transitions: Vec<&Transition> = all_transitions.iter()
-        .filter(|t| t.from == start_state)
-        .collect();
-
-    // Scale burn_in proportionally since we have fewer transitions
-    // This helps control Type I error with smaller sample
-    let so_frac = start_only_transitions.len() as f64 / n.max(1) as f64;
-    let so_burn_in = ((burn_in as f64 / so_frac.max(0.1)).min(start_only_transitions.len() as f64 / 3.0)) as usize;
-    let so_ramp = ((ramp as f64 / so_frac.max(0.1)).min(start_only_transitions.len() as f64 / 2.0)) as usize;
-
-    let mut start_only_stop_n = None;
-    if start_only_transitions.len() >= so_burn_in.max(10) {
-        let mut so_wealth = 1.0;
-        let (mut so_good_trt, mut so_total_trt, mut so_good_ctrl, mut so_total_ctrl) = (0.0, 0.0, 0.0, 0.0);
-
-        for (i, trans) in start_only_transitions.iter().enumerate() {
-            let is_good = is_good_transition(trans.from, trans.to);
-            let is_trt = trans.arm == 1;
-
-            let lambda = if i > so_burn_in && so_total_trt > 0.0 && so_total_ctrl > 0.0 {
-                let c_i = (((i - so_burn_in) as f64) / so_ramp as f64).clamp(0.0, 1.0);
-                let rate_trt = so_good_trt / so_total_trt;
-                let rate_ctrl = so_good_ctrl / so_total_ctrl;
-                let delta = rate_trt - rate_ctrl;
-                // Use 0.4 instead of 0.5 for more conservative betting (reduces Type I)
-                if is_good { 0.5 + 0.4 * c_i * delta } else { 0.5 - 0.4 * c_i * delta }
-            } else { 0.5 };
-
-            let lambda = lambda.clamp(0.01, 0.99);
-            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            so_wealth *= mult;
-
-            if is_trt { so_total_trt += 1.0; if is_good { so_good_trt += 1.0; } }
-            else { so_total_ctrl += 1.0; if is_good { so_good_ctrl += 1.0; } }
-
-            if so_wealth >= threshold {
-                start_only_stop_n = Some(i + 1);
-                break;
-            }
-        }
-    }
-
     (Trial {
-        stop_n, agnostic_stop_n, start_only_stop_n, effect_at_stop, effect_final, min_wealth,
+        stop_n, agnostic_stop_n, effect_at_stop, effect_final, min_wealth,
         n_transitions: n,
         n_good_trt: cnt_good_trt, n_bad_trt: cnt_bad_trt,
         n_good_ctrl: cnt_good_ctrl, n_bad_ctrl: cnt_bad_ctrl,
@@ -693,14 +646,8 @@ pub fn run() {
 
     let alt_ert_success = alt_trials.iter().filter(|t| t.stop_n.is_some()).count();
     let alt_agn_success = alt_trials.iter().filter(|t| t.agnostic_stop_n.is_some()).count();
-    let alt_so_success = alt_trials.iter().filter(|t| t.start_only_stop_n.is_some()).count();
     let power_ert = 100.0 * alt_ert_success as f64 / n_sims as f64;
     let power_agn = 100.0 * alt_agn_success as f64 / n_sims as f64;
-    let power_so = 100.0 * alt_so_success as f64 / n_sims as f64;
-
-    // Type I for start-only
-    let null_so_reject = null_trials.iter().filter(|t| t.start_only_stop_n.is_some()).count();
-    let type1_so = 100.0 * null_so_reject as f64 / n_sims as f64;
 
     // Markov LRT power (fairer benchmark - tests transition rate differences)
     let null_markov_reject = null_trials.iter()
@@ -777,25 +724,10 @@ pub fn run() {
     console.push_str(&format!("Markov LRT Power: {:.1}%  (Type I: {:.2}%)\n\n", power_markov, type1_markov));
 
     console.push_str(&format!("--- Power at N={} ---\n", n_patients));
-    console.push_str(&format!("Prop Odds:     {:.1}%\n", po_power * 100.0));
-    console.push_str(&format!("Markov LRT:    {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
-    console.push_str(&format!("e-RTms:        {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
-    console.push_str(&format!("e-RTms-start:  {:.1}%  (Type I: {:.2}%)  [transitions from start only]\n", power_so, type1_so));
-    console.push_str(&format!("e-RTu:         {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
-
-    // Strategy recommendation
-    console.push_str("--- Recommended Strategy ---\n");
-    let best_power = power_ert.max(power_so);
-    if power_so > power_ert + 5.0 {
-        console.push_str(">> e-RTms-start: Better when states bounce (non-absorbing)\n");
-        console.push_str(&format!("   Power gain: +{:.1}% over regular e-RTms\n\n", power_so - power_ert));
-    } else if power_ert > power_so + 5.0 {
-        console.push_str(">> e-RTms: Better when transitions are one-way (absorbing states)\n");
-        console.push_str(&format!("   Power gain: +{:.1}% over start-only\n\n", power_ert - power_so));
-    } else {
-        console.push_str(">> Either strategy works similarly for this model\n");
-        console.push_str(&format!("   Best power: {:.1}%\n\n", best_power));
-    }
+    console.push_str(&format!("Prop Odds:   {:.1}%\n", po_power * 100.0));
+    console.push_str(&format!("Markov LRT:  {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
+    console.push_str(&format!("e-RTms:      {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
+    console.push_str(&format!("e-RTu:       {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
 
     console.push_str("--- Type M Error ---\n");
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));
