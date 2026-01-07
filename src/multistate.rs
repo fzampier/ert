@@ -156,6 +156,12 @@ struct Trial {
     effect_at_stop: f64,
     effect_final: f64,
     min_wealth: f64,
+    // Transition diagnostics
+    n_transitions: usize,
+    n_good_trt: usize,
+    n_bad_trt: usize,
+    n_good_ctrl: usize,
+    n_bad_ctrl: usize,
 }
 
 // === PROPORTIONAL ODDS BENCHMARK ===
@@ -271,7 +277,9 @@ fn run_single_trial<R: Rng + ?Sized>(
             agnostic_stop_n: None,
             effect_at_stop: 0.0,
             effect_final: 0.0,
-            min_wealth: 1.0
+            min_wealth: 1.0,
+            n_transitions: all_transitions.len(),
+            n_good_trt: 0, n_bad_trt: 0, n_good_ctrl: 0, n_bad_ctrl: 0,
         }, vec![1.0]);
     }
 
@@ -280,10 +288,18 @@ fn run_single_trial<R: Rng + ?Sized>(
     let mut wealth = vec![1.0; n];
     let mut effects = vec![0.0; n];
     let (mut n_good_trt, mut n_total_trt, mut n_good_ctrl, mut n_total_ctrl) = (0.0, 0.0, 0.0, 0.0);
+    let (mut cnt_good_trt, mut cnt_bad_trt, mut cnt_good_ctrl, mut cnt_bad_ctrl) = (0usize, 0usize, 0usize, 0usize);
 
     for (i, trans) in all_transitions.iter().enumerate() {
         let is_good = is_good_transition(trans.from, trans.to);
         let is_trt = trans.arm == 1;
+
+        // Count for diagnostics
+        if is_trt {
+            if is_good { cnt_good_trt += 1; } else { cnt_bad_trt += 1; }
+        } else {
+            if is_good { cnt_good_ctrl += 1; } else { cnt_bad_ctrl += 1; }
+        }
 
         let lambda = if i > burn_in && n_total_trt > 0.0 && n_total_ctrl > 0.0 {
             let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
@@ -324,7 +340,12 @@ fn run_single_trial<R: Rng + ?Sized>(
         }
     }
 
-    (Trial { stop_n, agnostic_stop_n, effect_at_stop, effect_final, min_wealth }, wealth)
+    (Trial {
+        stop_n, agnostic_stop_n, effect_at_stop, effect_final, min_wealth,
+        n_transitions: n,
+        n_good_trt: cnt_good_trt, n_bad_trt: cnt_bad_trt,
+        n_good_ctrl: cnt_good_ctrl, n_bad_ctrl: cnt_bad_ctrl,
+    }, wealth)
 }
 
 fn compute_day_n<R: Rng + ?Sized>(
@@ -560,6 +581,21 @@ pub fn run() {
         console.push_str(&format!("{}={:.1}% ", config.state_names[i], p * 100.0));
     }
     console.push_str("\n\n");
+
+    // Transition diagnostics (average across alternative simulations)
+    let avg_n_trans = alt_trials.iter().map(|t| t.n_transitions).sum::<usize>() as f64 / n_sims as f64;
+    let avg_good_trt = alt_trials.iter().map(|t| t.n_good_trt).sum::<usize>() as f64 / n_sims as f64;
+    let avg_bad_trt = alt_trials.iter().map(|t| t.n_bad_trt).sum::<usize>() as f64 / n_sims as f64;
+    let avg_good_ctrl = alt_trials.iter().map(|t| t.n_good_ctrl).sum::<usize>() as f64 / n_sims as f64;
+    let avg_bad_ctrl = alt_trials.iter().map(|t| t.n_bad_ctrl).sum::<usize>() as f64 / n_sims as f64;
+    let trt_good_rate = if avg_good_trt + avg_bad_trt > 0.0 { avg_good_trt / (avg_good_trt + avg_bad_trt) } else { 0.0 };
+    let ctrl_good_rate = if avg_good_ctrl + avg_bad_ctrl > 0.0 { avg_good_ctrl / (avg_good_ctrl + avg_bad_ctrl) } else { 0.0 };
+
+    console.push_str("--- Transition Diagnostics ---\n");
+    console.push_str(&format!("Avg transitions/trial: {:.0}\n", avg_n_trans));
+    console.push_str(&format!("Treatment: {:.0} good, {:.0} bad ({:.1}% good)\n", avg_good_trt, avg_bad_trt, trt_good_rate * 100.0));
+    console.push_str(&format!("Control:   {:.0} good, {:.0} bad ({:.1}% good)\n", avg_good_ctrl, avg_bad_ctrl, ctrl_good_rate * 100.0));
+    console.push_str(&format!("Rate diff: {:.1}%\n\n", (trt_good_rate - ctrl_good_rate) * 100.0));
 
     console.push_str("--- Proportional Odds Benchmark ---\n");
     console.push_str(&format!("Proportional OR:     {:.2}\n", prop_or));
