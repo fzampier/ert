@@ -783,6 +783,20 @@ pub fn run() {
     console.push_str(&format!("e-RTms-start:  {:.1}%  (Type I: {:.2}%)  [transitions from start only]\n", power_so, type1_so));
     console.push_str(&format!("e-RTu:         {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
 
+    // Strategy recommendation
+    console.push_str("--- Recommended Strategy ---\n");
+    let best_power = power_ert.max(power_so);
+    if power_so > power_ert + 5.0 {
+        console.push_str(">> e-RTms-start: Better when states bounce (non-absorbing)\n");
+        console.push_str(&format!("   Power gain: +{:.1}% over regular e-RTms\n\n", power_so - power_ert));
+    } else if power_ert > power_so + 5.0 {
+        console.push_str(">> e-RTms: Better when transitions are one-way (absorbing states)\n");
+        console.push_str(&format!("   Power gain: +{:.1}% over start-only\n\n", power_ert - power_so));
+    } else {
+        console.push_str(">> Either strategy works similarly for this model\n");
+        console.push_str(&format!("   Best power: {:.1}%\n\n", best_power));
+    }
+
     console.push_str("--- Type M Error ---\n");
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));
     console.push_str(&format!("Effect at final: {:.3}\n", avg_effect_final));
