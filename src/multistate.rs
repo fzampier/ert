@@ -153,6 +153,7 @@ struct Transition {
 struct Trial {
     stop_n: Option<usize>,
     agnostic_stop_n: Option<usize>,
+    stratified_stop_n: Option<usize>,  // Stratified average e-process
     effect_at_stop: f64,
     effect_final: f64,
     min_wealth: f64,
@@ -165,6 +166,17 @@ struct Trial {
     // For Markov LRT
     trt_counts: Vec<Vec<usize>>,
     ctrl_counts: Vec<Vec<usize>>,
+}
+
+// Per-stratum state for stratified e-process
+#[derive(Clone)]
+struct Stratum {
+    n_good_trt: f64,
+    n_total_trt: f64,
+    n_good_ctrl: f64,
+    n_total_ctrl: f64,
+    wealth: f64,
+    n_obs: usize,
 }
 
 // === PROPORTIONAL ODDS BENCHMARK ===
@@ -375,6 +387,7 @@ fn run_single_trial<R: Rng + ?Sized>(
         return (Trial {
             stop_n: None,
             agnostic_stop_n: None,
+            stratified_stop_n: None,
             effect_at_stop: 0.0,
             effect_final: 0.0,
             min_wealth: 1.0,
@@ -441,8 +454,50 @@ fn run_single_trial<R: Rng + ?Sized>(
         }
     }
 
+    // Stratified e-process: average of per-stratum e-values
+    let mut strata: Vec<Stratum> = (0..n_states).map(|_| Stratum {
+        n_good_trt: 0.0, n_total_trt: 0.0,
+        n_good_ctrl: 0.0, n_total_ctrl: 0.0,
+        wealth: 1.0, n_obs: 0,
+    }).collect();
+
+    let mut stratified_stop_n = None;
+    for (i, trans) in all_transitions.iter().enumerate() {
+        let is_good = is_good_transition(trans.from, trans.to);
+        let is_trt = trans.arm == 1;
+        let from = trans.from;
+
+        let s = &mut strata[from];
+        s.n_obs += 1;
+
+        // Compute stratum-specific lambda
+        let s_lambda = if s.n_obs > burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
+            let c_i = (((s.n_obs - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
+            let rate_trt = s.n_good_trt / s.n_total_trt;
+            let rate_ctrl = s.n_good_ctrl / s.n_total_ctrl;
+            let delta = rate_trt - rate_ctrl;
+            if is_good { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta }
+        } else { 0.5 };
+
+        let s_lambda = s_lambda.clamp(0.01, 0.99);
+        let s_mult = if is_trt { s_lambda / 0.5 } else { (1.0 - s_lambda) / 0.5 };
+        s.wealth *= s_mult;
+
+        // Update stratum counts
+        if is_trt { s.n_total_trt += 1.0; if is_good { s.n_good_trt += 1.0; } }
+        else { s.n_total_ctrl += 1.0; if is_good { s.n_good_ctrl += 1.0; } }
+
+        // Average of active strata wealths
+        let active: Vec<f64> = strata.iter().filter(|s| s.n_obs > 0).map(|s| s.wealth).collect();
+        let avg_wealth = if !active.is_empty() { active.iter().sum::<f64>() / active.len() as f64 } else { 1.0 };
+
+        if stratified_stop_n.is_none() && avg_wealth >= threshold {
+            stratified_stop_n = Some(i + 1);
+        }
+    }
+
     (Trial {
-        stop_n, agnostic_stop_n, effect_at_stop, effect_final, min_wealth,
+        stop_n, agnostic_stop_n, stratified_stop_n, effect_at_stop, effect_final, min_wealth,
         n_transitions: n,
         n_good_trt: cnt_good_trt, n_bad_trt: cnt_bad_trt,
         n_good_ctrl: cnt_good_ctrl, n_bad_ctrl: cnt_bad_ctrl,
@@ -646,8 +701,14 @@ pub fn run() {
 
     let alt_ert_success = alt_trials.iter().filter(|t| t.stop_n.is_some()).count();
     let alt_agn_success = alt_trials.iter().filter(|t| t.agnostic_stop_n.is_some()).count();
+    let alt_strat_success = alt_trials.iter().filter(|t| t.stratified_stop_n.is_some()).count();
     let power_ert = 100.0 * alt_ert_success as f64 / n_sims as f64;
     let power_agn = 100.0 * alt_agn_success as f64 / n_sims as f64;
+    let power_strat = 100.0 * alt_strat_success as f64 / n_sims as f64;
+
+    // Type I for stratified
+    let null_strat_reject = null_trials.iter().filter(|t| t.stratified_stop_n.is_some()).count();
+    let type1_strat = 100.0 * null_strat_reject as f64 / n_sims as f64;
 
     // Markov LRT power (fairer benchmark - tests transition rate differences)
     let null_markov_reject = null_trials.iter()
@@ -724,10 +785,11 @@ pub fn run() {
     console.push_str(&format!("Markov LRT Power: {:.1}%  (Type I: {:.2}%)\n\n", power_markov, type1_markov));
 
     console.push_str(&format!("--- Power at N={} ---\n", n_patients));
-    console.push_str(&format!("Prop Odds:   {:.1}%\n", po_power * 100.0));
-    console.push_str(&format!("Markov LRT:  {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
-    console.push_str(&format!("e-RTms:      {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
-    console.push_str(&format!("e-RTu:       {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
+    console.push_str(&format!("Prop Odds:    {:.1}%\n", po_power * 100.0));
+    console.push_str(&format!("Markov LRT:   {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
+    console.push_str(&format!("e-RTms:       {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
+    console.push_str(&format!("e-RTms-strat: {:.1}%  (Type I: {:.2}%)  [averaged across strata]\n", power_strat, type1_strat));
+    console.push_str(&format!("e-RTu:        {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
 
     console.push_str("--- Type M Error ---\n");
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));

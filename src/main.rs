@@ -9,6 +9,7 @@ mod analyze_continuous;
 mod analyze_survival;
 mod analyze_multistate;
 mod compare_methods;
+mod multistate_experiment;
 
 use std::env;
 
@@ -279,6 +280,7 @@ fn run_interactive() {
     println!("  8. Analyze Survival Trial (CSV)");
     println!("  9. Analyze Multi-State Trial (CSV)");
     println!(" 10. Compare e-RTo vs e-RTc");
+    println!(" 11. [Experiment] Stratified e-RTms");
     println!("  0. Exit");
 
     print!("\nSelect: ");
@@ -310,6 +312,7 @@ fn run_interactive() {
         }
         "9" => run_analyze_multistate_interactive(),
         "10" => compare_methods::run(),
+        "11" => multistate_experiment::run(),
         "0" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }
