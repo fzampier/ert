@@ -39,7 +39,6 @@ struct AnalysisResult {
     final_evalue: f64,
     min_evalue: f64,
     trajectory: Vec<f64>,  // wealth at each event
-    event_times: Vec<f64>,
 }
 
 // === CLI ===
@@ -194,7 +193,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
     let mut event_count: usize = 0;
 
     let mut trajectory: Vec<f64> = vec![1.0];
-    let mut event_times: Vec<f64> = vec![0.0];
     let mut min_wealth: f64 = 1.0;
 
     let mut crossed = false;
@@ -255,7 +253,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
             }
 
             trajectory.push(wealth);
-            event_times.push(rec.time);
 
             // Check crossing
             if !crossed && wealth >= threshold {
@@ -312,7 +309,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
         final_evalue: wealth,
         min_evalue: min_wealth,
         trajectory,
-        event_times,
     }
 }
 

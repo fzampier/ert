@@ -23,9 +23,11 @@ struct PatientRecord {
 
 #[derive(Debug, Clone)]
 struct Transition {
+    #[allow(dead_code)]
     patient_id: String,
     from_state: usize,
     to_state: usize,
+    #[allow(dead_code)]
     from_time: i32,
     to_time: i32,
     treatment: u8,
