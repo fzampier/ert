@@ -450,8 +450,14 @@ fn run_single_trial<R: Rng + ?Sized>(
         .filter(|t| t.from == start_state)
         .collect();
 
+    // Scale burn_in proportionally since we have fewer transitions
+    // This helps control Type I error with smaller sample
+    let so_frac = start_only_transitions.len() as f64 / n.max(1) as f64;
+    let so_burn_in = ((burn_in as f64 / so_frac.max(0.1)).min(start_only_transitions.len() as f64 / 3.0)) as usize;
+    let so_ramp = ((ramp as f64 / so_frac.max(0.1)).min(start_only_transitions.len() as f64 / 2.0)) as usize;
+
     let mut start_only_stop_n = None;
-    if start_only_transitions.len() >= burn_in {
+    if start_only_transitions.len() >= so_burn_in.max(10) {
         let mut so_wealth = 1.0;
         let (mut so_good_trt, mut so_total_trt, mut so_good_ctrl, mut so_total_ctrl) = (0.0, 0.0, 0.0, 0.0);
 
@@ -459,12 +465,13 @@ fn run_single_trial<R: Rng + ?Sized>(
             let is_good = is_good_transition(trans.from, trans.to);
             let is_trt = trans.arm == 1;
 
-            let lambda = if i > burn_in && so_total_trt > 0.0 && so_total_ctrl > 0.0 {
-                let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
+            let lambda = if i > so_burn_in && so_total_trt > 0.0 && so_total_ctrl > 0.0 {
+                let c_i = (((i - so_burn_in) as f64) / so_ramp as f64).clamp(0.0, 1.0);
                 let rate_trt = so_good_trt / so_total_trt;
                 let rate_ctrl = so_good_ctrl / so_total_ctrl;
                 let delta = rate_trt - rate_ctrl;
-                if is_good { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta }
+                // Use 0.4 instead of 0.5 for more conservative betting (reduces Type I)
+                if is_good { 0.5 + 0.4 * c_i * delta } else { 0.5 - 0.4 * c_i * delta }
             } else { 0.5 };
 
             let lambda = lambda.clamp(0.01, 0.99);
