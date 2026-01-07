@@ -363,13 +363,25 @@ fn compute_futility_grid(trials: &[Trial], thresholds: &[f64]) -> Vec<(f64, f64,
 
 // === INPUT HELPERS ===
 
-fn get_transition_matrix(n_states: usize, name: &str, state_names: &[String]) -> TransitionMatrix {
+fn get_transition_matrix(n_states: usize, name: &str, state_names: &[String], absorbing: &[usize]) -> TransitionMatrix {
     println!("\n--- {} Transition Matrix ---", name);
     println!("Enter probabilities for each row (must sum to 1.0)");
+    if !absorbing.is_empty() {
+        println!("(Absorbing states auto-filled: stay with p=1.0)");
+    }
 
     let mut m = TransitionMatrix::new(n_states);
 
     for from in 0..n_states {
+        // Auto-fill absorbing states
+        if absorbing.contains(&from) {
+            let mut probs = vec![0.0; n_states];
+            probs[from] = 1.0;
+            m.set_row(from, probs);
+            println!("\n{} (state {}) is absorbing → stays with p=1.0", state_names[from], from);
+            continue;
+        }
+
         println!("\nFrom {} (state {}):", state_names[from], from);
         let mut probs = Vec::new();
         for to in 0..n_states {
@@ -423,13 +435,13 @@ pub fn run() {
 
         let config = MultiStateConfig {
             state_names: state_names.clone(),
-            absorbing,
+            absorbing: absorbing.clone(),
             start_state,
             max_days,
         };
 
-        let p_ctrl = get_transition_matrix(n_states, "Control", &state_names);
-        let p_trt = get_transition_matrix(n_states, "Treatment", &state_names);
+        let p_ctrl = get_transition_matrix(n_states, "Control", &state_names, &absorbing);
+        let p_trt = get_transition_matrix(n_states, "Treatment", &state_names, &absorbing);
 
         (config, p_ctrl, p_trt)
     } else {
