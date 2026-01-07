@@ -1,7 +1,11 @@
-// multistate_experiment.rs - Stratified e-process experiment
+// multistate_experiment.rs - Educational: Why stratified averaging works
 //
-// Demonstrates that averaging stratified e-processes recovers power
-// when patients can bounce between non-absorbing states.
+// This module demonstrates why e-RTms uses stratified averaging:
+// - Naive pooling loses power with non-absorbing (bouncing) states
+// - Stratification by from_state recovers power
+// - Average of martingales is always a martingale (robust to dependence)
+//
+// The main e-RTms in multistate.rs uses stratified averaging by default.
 
 use rand::Rng;
 use rand::SeedableRng;

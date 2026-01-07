@@ -677,9 +677,7 @@ pub fn run() {
     }
     println!();
 
-    let null_ert_reject = null_trials.iter().filter(|t| t.stop_n.is_some()).count();
     let null_agn_reject = null_trials.iter().filter(|t| t.agnostic_stop_n.is_some()).count();
-    let type1_ert = 100.0 * null_ert_reject as f64 / n_sims as f64;
     let type1_agn = 100.0 * null_agn_reject as f64 / n_sims as f64;
 
     println!("\n--- Alternative ---");
@@ -693,10 +691,8 @@ pub fn run() {
     }
     println!();
 
-    let alt_ert_success = alt_trials.iter().filter(|t| t.stop_n.is_some()).count();
     let alt_agn_success = alt_trials.iter().filter(|t| t.agnostic_stop_n.is_some()).count();
     let alt_strat_success = alt_trials.iter().filter(|t| t.stratified_stop_n.is_some()).count();
-    let power_ert = 100.0 * alt_ert_success as f64 / n_sims as f64;
     let power_agn = 100.0 * alt_agn_success as f64 / n_sims as f64;
     let power_strat = 100.0 * alt_strat_success as f64 / n_sims as f64;
 
@@ -781,8 +777,7 @@ pub fn run() {
     console.push_str(&format!("--- Power at N={} ---\n", n_patients));
     console.push_str(&format!("Prop Odds:    {:.1}%\n", po_power * 100.0));
     console.push_str(&format!("Markov LRT:   {:.1}%  (Type I: {:.2}%)\n", power_markov, type1_markov));
-    console.push_str(&format!("e-RTms:       {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
-    console.push_str(&format!("e-RTms-strat: {:.1}%  (Type I: {:.2}%)  [averaged across strata]\n", power_strat, type1_strat));
+    console.push_str(&format!("e-RTms:       {:.1}%  (Type I: {:.2}%)\n", power_strat, type1_strat));
     console.push_str(&format!("e-RTu:        {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
 
     console.push_str("--- Type M Error ---\n");

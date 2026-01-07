@@ -15,7 +15,7 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTo | 2 | Bounded continuous (VFD 0-28, scores) | Mean Difference |
 | e-RTc | 2 | Unbounded continuous (biomarkers) | Cohen's d |
 | e-RTs | 3 | Time-to-event (survival) | Hazard-based |
-| e-RTms | 4 | Multi-state (ordinal transitions) | Proportional OR |
+| e-RTms | 4 | Multi-state (ordinal trajectories) | Proportional OR |
 | e-RTu | 5 | Universal/agnostic | Rate Difference |
 | Analyze Binary | 6 | Real trial CSV (binary) | RD, OR |
 | Analyze Continuous | 7 | Real trial CSV (continuous) | Mean Diff, d |
@@ -288,11 +288,9 @@ Cumulative signal drives betting:
 
 **State ordering:** States indexed 0 to N-1, where 0 = worst outcome, N-1 = best outcome.
 
-**Formula:**
+**Transition classification:**
 
 ```
-Each day, patient transitions according to transition matrix P[from][to].
-
 Good transition (treatment working):
     Moving to higher-indexed state (to > from)
     Examples: ICU -> Ward, Ward -> Home
@@ -302,15 +300,50 @@ Bad transition (treatment failing):
     Examples: Ward -> ICU, ICU -> Dead
 
 Neutral: Staying in same state (no signal)
-
-Signal for patient on day d:
-    If favorable transition:   signal = +1
-    If unfavorable transition: signal = -1
-    If no change or absorbing: no update
-
-Betting uses cumulative transition evidence:
-    lambda_n based on observed transition rate difference between arms
 ```
+
+**The bouncing problem:**
+
+When states are not absorbing (e.g., patients can move Ward -> ICU -> Ward), transitions from different states have different signal-to-noise ratios. A naive e-process that pools all transitions loses power because noisy bounce-back transitions dilute the treatment signal.
+
+**Solution: Stratified averaging**
+
+e-RTms runs a separate e-process for each "from state" (stratum), then averages their wealths:
+
+```
+For each from_state s = 0, 1, ..., N-1:
+    Track stratum-specific counts:
+        r_T^s = good transitions from s in treatment / total from s in treatment
+        r_C^s = good transitions from s in control / total from s in control
+        delta_s = r_T^s - r_C^s
+
+    Stratum betting (for transition from state s):
+        lambda_s = 0.5 + 0.5 * c(n) * delta_s * (good ? 1 : -1)
+        W_s *= (arm == T ? lambda_s : 1 - lambda_s) / 0.5
+
+Combined e-value (average of active strata):
+    E_n = (W_0 + W_1 + ... + W_k) / k
+    where k = number of strata with observations
+```
+
+**Why averaging works:**
+
+Each stratum's e-process is a martingale with E[W_s] = 1 under H0. By linearity of expectation:
+
+```
+E[(W_0 + W_1 + ... + W_k) / k] = (E[W_0] + E[W_1] + ... + E[W_k]) / k = 1
+```
+
+This holds regardless of dependence between strata (same patient can contribute to multiple strata). Averaging is robust; multiplication would require independence.
+
+**Performance:**
+
+| Scenario | Naive | Stratified |
+|----------|-------|------------|
+| Absorbing states (ICU) | 82% | 80% |
+| Bouncing states | 7% | 98% |
+
+Stratification recovers power when patients bounce between non-absorbing states.
 
 **Effect sizes (ICU preset):**
 - **Large:** OR ~1.6, +15% Home at day 28

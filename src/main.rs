@@ -280,7 +280,7 @@ fn run_interactive() {
     println!("  8. Analyze Survival Trial (CSV)");
     println!("  9. Analyze Multi-State Trial (CSV)");
     println!(" 10. Compare e-RTo vs e-RTc");
-    println!(" 11. [Experiment] Stratified e-RTms");
+    println!(" 11. [Demo] Why stratification works");
     println!("  0. Exit");
 
     print!("\nSelect: ");

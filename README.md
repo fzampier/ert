@@ -23,8 +23,10 @@ When wealth exceeds a threshold (e.g., 20 for alpha=0.05), we reject the null. V
 | e-RT | Binary | Response rates, mortality |
 | e-RTo | Continuous (bounded) | Ventilator-free days, pain scores |
 | e-RTc | Continuous (unbounded) | Biomarkers, lab values |
-| e-Survival | Time-to-event | Overall survival, PFS |
-| e-RTms | Multi-state | ICU trajectories (Ward/ICU/Home/Dead) |
+| e-RTs | Time-to-event | Overall survival, PFS |
+| e-RTms | Multi-state | ICU trajectories (Dead/ICU/Ward/Home) |
+
+e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
 
 ## Quick Start
 
