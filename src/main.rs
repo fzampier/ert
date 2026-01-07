@@ -8,7 +8,162 @@ mod analyze_binary;
 mod analyze_continuous;
 mod compare_methods;
 
+use std::env;
+
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    // If arguments provided, use CLI mode
+    if args.len() > 1 {
+        run_cli(&args[1..]);
+        return;
+    }
+
+    // Otherwise, interactive menu
+    run_interactive();
+}
+
+fn run_cli(args: &[String]) {
+    if args.is_empty() {
+        print_usage();
+        return;
+    }
+
+    match args[0].as_str() {
+        "analyze" | "a" => {
+            if args.len() < 2 {
+                eprintln!("Error: CSV file required");
+                eprintln!("Usage: ert analyze <file.csv> [options]");
+                return;
+            }
+            let csv_path = &args[1];
+            let opts = parse_analyze_options(&args[2..]);
+
+            if let Err(e) = analyze_continuous::run_cli(csv_path, &opts) {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "analyze-binary" | "ab" => {
+            if args.len() < 2 {
+                eprintln!("Error: CSV file required");
+                eprintln!("Usage: ert analyze-binary <file.csv> [options]");
+                return;
+            }
+            let csv_path = &args[1];
+            let opts = parse_analyze_options(&args[2..]);
+
+            if let Err(e) = analyze_binary::run_cli(csv_path, &opts) {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "help" | "-h" | "--help" => print_usage(),
+        _ => {
+            eprintln!("Unknown command: {}", args[0]);
+            print_usage();
+        }
+    }
+}
+
+fn parse_analyze_options(args: &[String]) -> AnalyzeOptions {
+    let mut opts = AnalyzeOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--method" | "-m" => {
+                if i + 1 < args.len() {
+                    opts.method = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--threshold" | "-t" => {
+                if i + 1 < args.len() {
+                    opts.threshold = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--burn-in" | "-b" => {
+                if i + 1 < args.len() {
+                    opts.burn_in = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--ramp" | "-r" => {
+                if i + 1 < args.len() {
+                    opts.ramp = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--min" => {
+                if i + 1 < args.len() {
+                    opts.min_val = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--max" => {
+                if i + 1 < args.len() {
+                    opts.max_val = args[i + 1].parse().ok();
+                    i += 1;
+                }
+            }
+            "--no-report" => {
+                opts.generate_report = false;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    opts
+}
+
+#[derive(Default)]
+pub struct AnalyzeOptions {
+    pub method: Option<String>,      // "rto", "rtc"
+    pub threshold: Option<f64>,      // default 20
+    pub burn_in: Option<usize>,      // default 50
+    pub ramp: Option<usize>,         // default 100
+    pub min_val: Option<f64>,        // for e-RTo
+    pub max_val: Option<f64>,        // for e-RTo
+    pub generate_report: bool,       // default true
+}
+
+impl AnalyzeOptions {
+    fn default() -> Self {
+        AnalyzeOptions {
+            method: None,
+            threshold: None,
+            burn_in: None,
+            ramp: None,
+            min_val: None,
+            max_val: None,
+            generate_report: true,
+        }
+    }
+}
+
+fn print_usage() {
+    println!("e-RT: Sequential Randomization Tests");
+    println!();
+    println!("USAGE:");
+    println!("  ert                          Interactive mode");
+    println!("  ert analyze <file.csv>       Analyze continuous trial data");
+    println!("  ert analyze-binary <file.csv> Analyze binary trial data");
+    println!();
+    println!("OPTIONS:");
+    println!("  -m, --method <rto|rtc>   Method (default: rtc)");
+    println!("  -t, --threshold <N>      Success threshold (default: 20)");
+    println!("  -b, --burn-in <N>        Burn-in period (default: 50)");
+    println!("  -r, --ramp <N>           Ramp period (default: 100)");
+    println!("  --min <N>                Min bound (e-RTo only)");
+    println!("  --max <N>                Max bound (e-RTo only)");
+    println!("  --no-report              Skip HTML report generation");
+    println!();
+    println!("EXAMPLES:");
+    println!("  ert analyze trial.csv");
+    println!("  ert analyze trial.csv --method rtc --threshold 20");
+    println!("  ert analyze-binary mortality.csv --threshold 20");
+}
+
+fn run_interactive() {
     println!("\n==========================================");
     println!("   e-RT: Sequential Randomization Tests");
     println!("==========================================");

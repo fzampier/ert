@@ -387,7 +387,8 @@ pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overfl
 <div class="plot"><div id="p2" style="height:350px"></div></div>
 <div class="plot"><div id="p3" style="height:350px"></div></div>
 <div class="plot"><div id="p4" style="height:350px"></div></div>
-{}</div>
+</div>
+{}
 <h2>Futility Grid</h2>
 <pre>{}{}</pre>
 <script>

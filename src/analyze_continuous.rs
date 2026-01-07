@@ -28,7 +28,7 @@ enum Method { LinearERT, MAD }
 #[derive(Clone)]
 struct FutilityPoint {
     patient_num: usize,
-    wealth: f64,
+    _wealth: f64,
     required_effect: f64,
     ratio_to_design: f64,
 }
@@ -36,7 +36,7 @@ struct FutilityPoint {
 #[derive(Clone)]
 struct DesignParams {
     control_mean: f64,
-    treatment_mean: f64,
+    _treatment_mean: f64,
     sd: f64,
     design_effect_linear: f64,
     design_effect_mad: f64,
@@ -136,12 +136,23 @@ impl MADProcess {
     }
 
     fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
+        // Continuous direction: standardized effect estimate (not just sign)
         let direction = if !self.outcomes.is_empty() {
-            let trt: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| t).map(|(&o, _)| o).collect();
-            let ctrl: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-            let mt = if !trt.is_empty() { trt.iter().sum::<f64>() / trt.len() as f64 } else { 0.0 };
-            let mc = if !ctrl.is_empty() { ctrl.iter().sum::<f64>() / ctrl.len() as f64 } else { 0.0 };
-            if mt > mc { 1.0 } else if mt < mc { -1.0 } else { 0.0 }
+            let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
+            let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
+            for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+                if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
+                else { sum_c += o; ss_c += o * o; n_c += 1.0; }
+            }
+            if n_t > 1.0 && n_c > 1.0 {
+                let m_t = sum_t / n_t;
+                let m_c = sum_c / n_c;
+                let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
+                let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
+                let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(0.001);
+                let delta = (m_t - m_c) / pooled_sd;
+                delta.clamp(-1.0, 1.0)
+            } else { 0.0 }
         } else { 0.0 };
 
         self.outcomes.push(outcome);
@@ -194,7 +205,78 @@ impl MADProcess {
     }
 }
 
-// === MAIN ===
+// === CLI ===
+
+pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<dyn Error>> {
+    println!("\n==========================================");
+    println!("   ANALYZE CONTINUOUS TRIAL DATA");
+    println!("==========================================\n");
+
+    println!("Reading {}...", csv_path);
+    let data = read_csv(csv_path)?;
+    if data.is_empty() { println!("Error: No valid data."); return Ok(()); }
+
+    // Summary stats
+    let trt: Vec<f64> = data.iter().filter(|r| r.0 == 1).map(|r| r.1).collect();
+    let ctrl: Vec<f64> = data.iter().filter(|r| r.0 == 0).map(|r| r.1).collect();
+    let (n_trt, n_ctrl) = (trt.len(), ctrl.len());
+    let mean_trt = if n_trt > 0 { trt.iter().sum::<f64>() / n_trt as f64 } else { 0.0 };
+    let mean_ctrl = if n_ctrl > 0 { ctrl.iter().sum::<f64>() / n_ctrl as f64 } else { 0.0 };
+    let min_obs = data.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+    let max_obs = data.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+
+    let ss_trt: f64 = trt.iter().map(|x| (x - mean_trt).powi(2)).sum();
+    let ss_ctrl: f64 = ctrl.iter().map(|x| (x - mean_ctrl).powi(2)).sum();
+    let pooled_sd = if n_trt > 1 && n_ctrl > 1 {
+        ((ss_trt + ss_ctrl) / (n_trt + n_ctrl - 2) as f64).sqrt()
+    } else { 1.0 };
+
+    println!("\n--- Data Summary ---");
+    println!("Total: {}  Trt: {} (mean {:.2})  Ctrl: {} (mean {:.2})", data.len(), n_trt, mean_trt, n_ctrl, mean_ctrl);
+    println!("Range: [{:.2}, {:.2}]  SD: {:.2}  Diff: {:.2}  d: {:.2}",
+             min_obs, max_obs, pooled_sd, mean_trt - mean_ctrl, (mean_trt - mean_ctrl) / pooled_sd);
+
+    // Determine method from CLI options
+    let method = match opts.method.as_deref() {
+        Some("rto") | Some("RTo") | Some("linear") => Method::LinearERT,
+        Some("rtc") | Some("RTc") | Some("mad") | Some("MAD") => Method::MAD,
+        _ => Method::MAD, // default to MAD/unbounded
+    };
+
+    let burn_in = opts.burn_in.unwrap_or(50);
+    let ramp = opts.ramp.unwrap_or(100);
+    let threshold = opts.threshold.unwrap_or(20.0);
+    let c_max = 0.6;
+
+    let (analysis_min, analysis_max) = if method == Method::LinearERT {
+        (opts.min_val.unwrap_or(min_obs), opts.max_val.unwrap_or(max_obs))
+    } else {
+        (min_obs, max_obs)
+    };
+
+    let method_name = match method { Method::LinearERT => "e-RTo", Method::MAD => "e-RTc" };
+    println!("\n--- Parameters ---");
+    println!("Method: {}  Burn-in: {}  Ramp: {}  Threshold: {}", method_name, burn_in, ramp, threshold);
+    if method == Method::LinearERT {
+        println!("Bounds: [{:.2}, {:.2}]", analysis_min, analysis_max);
+    }
+
+    println!("\n--- Running Analysis ---");
+    let result = analyze(&data, method, burn_in, ramp, threshold, c_max,
+                         analysis_min, analysis_max, pooled_sd, None, None);
+
+    print_results(&result, threshold, None);
+
+    if opts.generate_report {
+        let html = build_html(&result, csv_path, burn_in, ramp, threshold, None, c_max, analysis_min, analysis_max);
+        File::create("continuous_analysis_report.html")?.write_all(html.as_bytes())?;
+        println!("\n>> Saved: continuous_analysis_report.html");
+    }
+
+    Ok(())
+}
+
+// === INTERACTIVE ===
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     println!("\n==========================================");
@@ -249,7 +331,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let dt = get_input("Design treatment mean: ");
         let ds = get_input("Design SD: ");
         (Some(fut), Some(DesignParams {
-            control_mean: dc, treatment_mean: dt, sd: ds,
+            control_mean: dc, _treatment_mean: dt, sd: ds,
             design_effect_linear: (dt - dc).abs(),
             design_effect_mad: (dt - dc).abs() / ds,
         }))
@@ -428,7 +510,7 @@ fn analyze(data: &[(u8, f64)], method: Method, burn_in: usize, ramp: usize, thre
                         let req = required_effect_linear(proc.wealth, n_total - pnum, d.control_mean, d.sd,
                                                          min_val, max_val, burn_in, ramp, threshold, 100);
                         futility_points.push(FutilityPoint {
-                            patient_num: pnum, wealth: proc.wealth, required_effect: req,
+                            patient_num: pnum, _wealth: proc.wealth, required_effect: req,
                             ratio_to_design: req / d.design_effect_linear,
                         });
                     }
@@ -466,7 +548,7 @@ fn analyze(data: &[(u8, f64)], method: Method, burn_in: usize, ramp: usize, thre
                         let req = required_effect_mad(proc.wealth, n_total - pnum, d.control_mean, d.sd,
                                                       burn_in, ramp, c_max, threshold, 100);
                         futility_points.push(FutilityPoint {
-                            patient_num: pnum, wealth: proc.wealth, required_effect: req,
+                            patient_num: pnum, _wealth: proc.wealth, required_effect: req,
                             ratio_to_design: req / d.design_effect_mad,
                         });
                     }
@@ -545,7 +627,7 @@ fn build_html(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize, t
         Method::MAD => ("e-RTc", "Cohen's d"),
     };
 
-    let status = if r.crossed {
+    let _status = if r.crossed {
         format!("<span style='color:#27ae60;font-weight:bold'>CROSSED at patient {}</span>", r.crossed_at.unwrap())
     } else if fut_thresh.map_or(false, |f| r.final_evalue < f) {
         "<span style='color:#e67e22'>Below futility</span>".to_string()

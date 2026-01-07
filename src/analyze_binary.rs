@@ -27,15 +27,15 @@ struct CsvRowRaw {
 #[derive(Clone)]
 struct DesignParams {
     control_rate: f64,
-    treatment_rate: f64,
+    _treatment_rate: f64,
     design_arr: f64,
 }
 
 #[derive(Clone)]
 struct FutilityPoint {
     patient_num: usize,
-    wealth: f64,
-    required_arr: f64,
+    _wealth: f64,
+    _required_arr: f64,
     ratio_to_design: f64,
 }
 
@@ -59,7 +59,55 @@ struct AnalysisResult {
     design: Option<DesignParams>,
 }
 
-// === MAIN ===
+// === CLI ===
+
+pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<dyn Error>> {
+    println!("\n==========================================");
+    println!("   ANALYZE BINARY TRIAL DATA");
+    println!("==========================================\n");
+
+    println!("Reading {}...", csv_path);
+    let data = read_csv(csv_path)?;
+    if data.is_empty() {
+        println!("Error: No valid rows in CSV.");
+        return Ok(());
+    }
+
+    let n_total = data.len();
+    let n_trt: usize = data.iter().filter(|&(t, _)| *t == 1).count();
+    let n_ctrl = n_total - n_trt;
+    let events_trt: usize = data.iter().filter(|&(t, o)| *t == 1 && *o == 1).count();
+    let events_ctrl: usize = data.iter().filter(|&(t, o)| *t == 0 && *o == 1).count();
+
+    println!("\n--- Data Summary ---");
+    println!("Total:      {}", n_total);
+    println!("Treatment:  {} ({} events, {:.1}%)", n_trt, events_trt,
+             if n_trt > 0 { events_trt as f64 / n_trt as f64 * 100.0 } else { 0.0 });
+    println!("Control:    {} ({} events, {:.1}%)", n_ctrl, events_ctrl,
+             if n_ctrl > 0 { events_ctrl as f64 / n_ctrl as f64 * 100.0 } else { 0.0 });
+
+    let burn_in = opts.burn_in.unwrap_or(50);
+    let ramp = opts.ramp.unwrap_or(100);
+    let threshold = opts.threshold.unwrap_or(20.0);
+
+    println!("\n--- Parameters ---");
+    println!("Burn-in: {}  Ramp: {}  Threshold: {}", burn_in, ramp, threshold);
+
+    println!("\n--- Running Analysis ---");
+    let result = analyze(&data, burn_in, ramp, threshold, None, None);
+
+    print_results(&result, threshold, None);
+
+    if opts.generate_report {
+        let html = build_report(&result, csv_path, burn_in, ramp, threshold, None);
+        File::create("binary_analysis_report.html")?.write_all(html.as_bytes())?;
+        println!("\n>> Saved: binary_analysis_report.html");
+    }
+
+    Ok(())
+}
+
+// === INTERACTIVE ===
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     println!("\n==========================================");
@@ -100,7 +148,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let p_trt: f64 = get_input("Design treatment rate (e.g., 0.20): ");
         let arr = (p_ctrl - p_trt).abs();
         println!("Design ARR: {:.1}%", arr * 100.0);
-        (Some(fut), Some(DesignParams { control_rate: p_ctrl, treatment_rate: p_trt, design_arr: arr }))
+        (Some(fut), Some(DesignParams { control_rate: p_ctrl, _treatment_rate: p_trt, design_arr: arr }))
     } else {
         (None, None)
     };
@@ -231,7 +279,7 @@ fn analyze(
             if below && patient % checkpoint == 0 && patient > burn_in {
                 let req = required_arr_for_recovery(proc.wealth, n_total - patient, d.control_rate, burn_in, ramp, threshold);
                 fut_points.push(FutilityPoint {
-                    patient_num: patient, wealth: proc.wealth, required_arr: req, ratio_to_design: req / d.design_arr,
+                    patient_num: patient, _wealth: proc.wealth, _required_arr: req, ratio_to_design: req / d.design_arr,
                 });
             }
         }

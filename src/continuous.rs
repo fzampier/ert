@@ -16,6 +16,18 @@ use crate::agnostic::{AgnosticERT, Signal, Arm};
 #[derive(Clone, Copy, PartialEq)]
 enum Method { LinearERT, MAD }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Distribution { Uniform, Normal, VFDMixture }
+
+#[derive(Clone, Copy)]
+struct VFDParams {
+    p_death_ctrl: f64,
+    p_death_trt: f64,
+    survivor_mean_ctrl: f64,  // mean VFD among survivors (e.g., 18)
+    survivor_mean_trt: f64,   // mean VFD among survivors (e.g., 21)
+    max_val: f64,             // typically 28
+}
+
 struct Trial {
     stop_n: Option<usize>,
     effect_at_stop: f64,
@@ -188,6 +200,90 @@ fn gamma_ln(x: f64) -> f64 {
     -tmp + (2.5066282746310005 * ser / x).ln()
 }
 
+// === VFD MIXTURE SAMPLING ===
+
+/// Sample from Beta(alpha, beta) using rejection sampling
+fn sample_beta<R: Rng + ?Sized>(rng: &mut R, alpha: f64, beta: f64) -> f64 {
+    // Use Gamma sampling method: X ~ Gamma(alpha), Y ~ Gamma(beta), then X/(X+Y) ~ Beta(alpha, beta)
+    let x = sample_gamma(rng, alpha);
+    let y = sample_gamma(rng, beta);
+    if x + y > 0.0 { x / (x + y) } else { 0.5 }
+}
+
+/// Sample from Gamma(shape, 1) using Marsaglia and Tsang's method
+fn sample_gamma<R: Rng + ?Sized>(rng: &mut R, shape: f64) -> f64 {
+    if shape < 1.0 {
+        // For shape < 1, use: Gamma(shape) = Gamma(shape+1) * U^(1/shape)
+        let u: f64 = rng.gen();
+        sample_gamma(rng, shape + 1.0) * u.powf(1.0 / shape)
+    } else {
+        let d = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * d).sqrt();
+        loop {
+            let x: f64 = sample_standard_normal(rng);
+            let v = (1.0 + c * x).powi(3);
+            if v > 0.0 {
+                let u: f64 = rng.gen();
+                if u < 1.0 - 0.0331 * x.powi(4) || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+                    return d * v;
+                }
+            }
+        }
+    }
+}
+
+/// Box-Muller transform for standard normal
+fn sample_standard_normal<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    let u1: f64 = rng.gen();
+    let u2: f64 = rng.gen();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// Sample from VFD mixture model
+fn sample_vfd<R: Rng + ?Sized>(rng: &mut R, p_death: f64, survivor_mean: f64, max_val: f64) -> f64 {
+    if rng.gen::<f64>() < p_death {
+        0.0  // Death
+    } else {
+        // Survivor: Beta distribution scaled to [1, max_val]
+        // Map survivor_mean (on 1..max_val) to Beta mean (on 0..1)
+        let beta_mean = (survivor_mean - 1.0) / (max_val - 1.0);
+        let beta_mean = beta_mean.clamp(0.05, 0.95);  // Avoid extreme parameters
+
+        // Use concentration parameter to control variance
+        // Higher concentration = tighter distribution around mean
+        let concentration = 8.0;  // Reasonable spread
+        let alpha = beta_mean * concentration;
+        let beta = (1.0 - beta_mean) * concentration;
+
+        // Sample and scale to [1, max_val]
+        let x = sample_beta(rng, alpha, beta);
+        1.0 + x * (max_val - 1.0)
+    }
+}
+
+/// Calculate mean and SD for VFD mixture (for sample size calculation)
+fn vfd_mixture_moments(p_death: f64, survivor_mean: f64, max_val: f64) -> (f64, f64) {
+    // E[X] = (1 - p_death) * survivor_mean + p_death * 0
+    let mean = (1.0 - p_death) * survivor_mean;
+
+    // Var[X] = E[X^2] - E[X]^2
+    // E[X^2] = (1-p_death) * E[X^2 | survivor] + p_death * 0
+    // For Beta on [1, max_val]: E[X^2|survivor] ≈ survivor_mean^2 + variance_survivor
+    let beta_mean = (survivor_mean - 1.0) / (max_val - 1.0);
+    let concentration = 8.0;
+    let alpha = beta_mean.clamp(0.05, 0.95) * concentration;
+    let beta_param = (1.0 - beta_mean.clamp(0.05, 0.95)) * concentration;
+    let beta_var = (alpha * beta_param) / ((alpha + beta_param).powi(2) * (alpha + beta_param + 1.0));
+    let survivor_var = beta_var * (max_val - 1.0).powi(2) as f64;
+
+    // Total variance using law of total variance
+    let e_x2_survivor = survivor_mean.powi(2) as f64 + survivor_var;
+    let e_x2 = (1.0 - p_death) * e_x2_survivor;
+    let var = e_x2 - mean.powi(2) as f64 + p_death * (1.0 - p_death) * survivor_mean.powi(2) as f64;
+
+    (mean, var.sqrt())
+}
+
 // === SIMULATION ===
 
 fn run_simulation<R: Rng + ?Sized>(
@@ -195,6 +291,7 @@ fn run_simulation<R: Rng + ?Sized>(
     mu_ctrl: f64, mu_trt: f64, sd: f64, min_val: f64, max_val: f64,
     _design_effect: f64, threshold: f64, _fut_watch: f64,
     burn_in: usize, ramp: usize, c_max: f64,
+    distribution: Distribution, vfd_params: Option<VFDParams>,
 ) -> (Vec<Trial>, Vec<Vec<f64>>, Vec<usize>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
     let alpha = 1.0 / threshold;
@@ -238,9 +335,28 @@ fn run_simulation<R: Rng + ?Sized>(
 
             for i in 1..=n_pts {
                 let is_trt = rng.gen_bool(0.5);
-                let mu = if is_trt { mu_trt } else { mu_ctrl };
-                let outcome = (rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu;
-                let outcome = outcome.clamp(min_val, max_val);
+
+                // Sample outcome based on distribution
+                let outcome = match distribution {
+                    Distribution::VFDMixture => {
+                        let vfd = vfd_params.unwrap();
+                        let (p_death, surv_mean) = if is_trt {
+                            (vfd.p_death_trt, vfd.survivor_mean_trt)
+                        } else {
+                            (vfd.p_death_ctrl, vfd.survivor_mean_ctrl)
+                        };
+                        sample_vfd(rng, p_death, surv_mean, vfd.max_val)
+                    }
+                    Distribution::Normal => {
+                        let mu = if is_trt { mu_trt } else { mu_ctrl };
+                        let z = sample_standard_normal(rng);
+                        (mu + z * sd).clamp(min_val, max_val)
+                    }
+                    Distribution::Uniform => {
+                        let mu = if is_trt { mu_trt } else { mu_ctrl };
+                        ((rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu).clamp(min_val, max_val)
+                    }
+                };
                 outcomes.push((outcome, is_trt));
 
                 proc.update(i, outcome, is_trt);
@@ -283,7 +399,16 @@ fn run_simulation<R: Rng + ?Sized>(
             for i in 1..=n_pts {
                 let is_trt = rng.gen_bool(0.5);
                 let mu = if is_trt { mu_trt } else { mu_ctrl };
-                let outcome = rng.gen::<f64>() * sd * 2.0 - sd + mu;
+
+                // Sample outcome (MAD is unbounded, so Normal or Uniform)
+                let outcome = match distribution {
+                    Distribution::Normal | Distribution::VFDMixture => {
+                        mu + sample_standard_normal(rng) * sd
+                    }
+                    Distribution::Uniform => {
+                        rng.gen::<f64>() * sd * 2.0 - sd + mu
+                    }
+                };
                 outcomes.push((outcome, is_trt));
 
                 proc.update(i, outcome, is_trt);
@@ -342,6 +467,7 @@ fn run_type1<R: Rng + ?Sized>(
     rng: &mut R, method: Method, n_pts: usize, n_sims: usize,
     mu_ctrl: f64, sd: f64, min_val: f64, max_val: f64,
     threshold: f64, burn_in: usize, ramp: usize, c_max: f64,
+    distribution: Distribution, vfd_params: Option<VFDParams>,
 ) -> f64 {
     let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
     print!("  {} Type I Error... ", method_name);
@@ -353,8 +479,19 @@ fn run_type1<R: Rng + ?Sized>(
             let mut proc = LinearERTProcess::new(burn_in, ramp, min_val, max_val);
             for i in 1..=n_pts {
                 let is_trt = rng.gen_bool(0.5);
-                let outcome = (rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu_ctrl;
-                let outcome = outcome.clamp(min_val, max_val);
+                // Under null, both arms have same distribution (use control params)
+                let outcome = match distribution {
+                    Distribution::VFDMixture => {
+                        let vfd = vfd_params.unwrap();
+                        sample_vfd(rng, vfd.p_death_ctrl, vfd.survivor_mean_ctrl, vfd.max_val)
+                    }
+                    Distribution::Normal => {
+                        (mu_ctrl + sample_standard_normal(rng) * sd).clamp(min_val, max_val)
+                    }
+                    Distribution::Uniform => {
+                        ((rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu_ctrl).clamp(min_val, max_val)
+                    }
+                };
                 proc.update(i, outcome, is_trt);
                 if proc.wealth > threshold { rejections += 1; break; }
             }
@@ -362,7 +499,14 @@ fn run_type1<R: Rng + ?Sized>(
             let mut proc = MADProcess::new(burn_in, ramp, c_max);
             for i in 1..=n_pts {
                 let is_trt = rng.gen_bool(0.5);
-                let outcome = rng.gen::<f64>() * sd * 2.0 - sd + mu_ctrl;
+                let outcome = match distribution {
+                    Distribution::Normal | Distribution::VFDMixture => {
+                        mu_ctrl + sample_standard_normal(rng) * sd
+                    }
+                    Distribution::Uniform => {
+                        rng.gen::<f64>() * sd * 2.0 - sd + mu_ctrl
+                    }
+                };
                 proc.update(i, outcome, is_trt);
                 if proc.wealth > threshold { rejections += 1; break; }
             }
@@ -490,14 +634,52 @@ pub fn run() {
     let method = if method_choice == 1 { Method::LinearERT } else { Method::MAD };
     let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
 
-    let mu_ctrl: f64 = get_input("Control Mean (e.g., 14): ");
-    let mu_trt: f64 = get_input("Treatment Mean (e.g., 18): ");
+    // Distribution selection for e-RTo
+    let (distribution, vfd_params) = if method == Method::LinearERT {
+        let dist_choice = get_choice("Outcome distribution:", &[
+            "VFD Mixture (bimodal: mortality spike + survivor distribution)",
+            "Normal",
+            "Uniform",
+        ]);
+        match dist_choice {
+            1 => {
+                println!("\n--- VFD Mixture Parameters ---");
+                let p_death_ctrl: f64 = get_input("Control mortality rate (e.g., 0.30): ");
+                let p_death_trt: f64 = get_input("Treatment mortality rate (e.g., 0.25): ");
+                let survivor_mean_ctrl: f64 = get_input("Control survivor mean VFD (e.g., 18): ");
+                let survivor_mean_trt: f64 = get_input("Treatment survivor mean VFD (e.g., 20): ");
+                let max_val: f64 = get_input("Max VFD (e.g., 28): ");
+                let vfd = VFDParams { p_death_ctrl, p_death_trt, survivor_mean_ctrl, survivor_mean_trt, max_val };
+                (Distribution::VFDMixture, Some(vfd))
+            }
+            2 => (Distribution::Normal, None),
+            _ => (Distribution::Uniform, None),
+        }
+    } else {
+        let dist_choice = get_choice("Outcome distribution:", &["Normal", "Uniform"]);
+        if dist_choice == 1 { (Distribution::Normal, None) } else { (Distribution::Uniform, None) }
+    };
 
-    let (min_val, max_val) = if method == Method::LinearERT {
-        (get_input("Min bound (e.g., 0): "), get_input("Max bound (e.g., 28): "))
-    } else { (f64::MIN, f64::MAX) };
-
-    let sd: f64 = get_input("Standard Deviation (e.g., 8): ");
+    // Get means (computed from VFD params if mixture)
+    let (mu_ctrl, mu_trt, sd, min_val, max_val) = if distribution == Distribution::VFDMixture {
+        let vfd = vfd_params.unwrap();
+        let (mc, sc) = vfd_mixture_moments(vfd.p_death_ctrl, vfd.survivor_mean_ctrl, vfd.max_val);
+        let (mt, st) = vfd_mixture_moments(vfd.p_death_trt, vfd.survivor_mean_trt, vfd.max_val);
+        let pooled_sd = ((sc.powi(2) + st.powi(2)) / 2.0).sqrt();
+        println!("\nDerived from mixture model:");
+        println!("  Control mean: {:.2}, SD: {:.2}", mc, sc);
+        println!("  Treatment mean: {:.2}, SD: {:.2}", mt, st);
+        println!("  Pooled SD: {:.2}", pooled_sd);
+        (mc, mt, pooled_sd, 0.0, vfd.max_val)
+    } else {
+        let mu_ctrl: f64 = get_input("Control Mean (e.g., 14): ");
+        let mu_trt: f64 = get_input("Treatment Mean (e.g., 18): ");
+        let (min_val, max_val) = if method == Method::LinearERT {
+            (get_input("Min bound (e.g., 0): "), get_input("Max bound (e.g., 28): "))
+        } else { (f64::MIN, f64::MAX) };
+        let sd: f64 = get_input("Standard Deviation (e.g., 8): ");
+        (mu_ctrl, mu_trt, sd, min_val, max_val)
+    };
 
     let design_effect = if method == Method::LinearERT {
         (mu_trt - mu_ctrl).abs()
@@ -536,6 +718,18 @@ pub fn run() {
     console.push_str(&format!("   PARAMETERS\n"));
     console.push_str(&format!("==========================================\n"));
     console.push_str(&format!("Method:      {}\n", method_name));
+    let dist_name = match distribution {
+        Distribution::VFDMixture => "VFD Mixture",
+        Distribution::Normal => "Normal",
+        Distribution::Uniform => "Uniform",
+    };
+    console.push_str(&format!("Distribution: {}\n", dist_name));
+    if let Some(vfd) = vfd_params {
+        console.push_str(&format!("  Ctrl mortality: {:.0}%, survivor mean: {:.1}\n",
+            vfd.p_death_ctrl * 100.0, vfd.survivor_mean_ctrl));
+        console.push_str(&format!("  Trt mortality:  {:.0}%, survivor mean: {:.1}\n",
+            vfd.p_death_trt * 100.0, vfd.survivor_mean_trt));
+    }
     console.push_str(&format!("Control:     {:.2}\n", mu_ctrl));
     console.push_str(&format!("Treatment:   {:.2}\n", mu_trt));
     if method == Method::LinearERT {
@@ -560,12 +754,13 @@ pub fn run() {
     println!("==========================================\n");
 
     // Type I Error
-    let type1 = run_type1(&mut *rng, method, n_pts, n_sims, mu_ctrl, sd, min_val, max_val, threshold, burn_in, ramp, c_max);
+    let type1 = run_type1(&mut *rng, method, n_pts, n_sims, mu_ctrl, sd, min_val, max_val,
+        threshold, burn_in, ramp, c_max, distribution, vfd_params);
 
     // Power simulation
     let (trials, trajs, x, y_lo, y_med, y_hi) = run_simulation(
         &mut *rng, method, n_pts, n_sims, mu_ctrl, mu_trt, sd, min_val, max_val,
-        design_effect, threshold, fut_watch, burn_in, ramp, c_max
+        design_effect, threshold, fut_watch, burn_in, ramp, c_max, distribution, vfd_params
     );
 
     // Compute statistics
