@@ -198,9 +198,9 @@ fn run_stratified_trial<R: Rng + ?Sized>(
         let s = &mut strata[from];
         s.n_obs += 1;
 
-        // Compute stratum-specific lambda
-        let s_lambda = if s.n_obs > burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
-            let c_i = (((s.n_obs - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
+        // Compute stratum-specific lambda (use global i for burn-in, stratum counts for rates)
+        let s_lambda = if i >= burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
+            let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
             let rate_trt = s.n_good_trt / s.n_total_trt;
             let rate_ctrl = s.n_good_ctrl / s.n_total_ctrl;
             let delta = rate_trt - rate_ctrl;
