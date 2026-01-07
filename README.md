@@ -1,84 +1,51 @@
 # ert
 
-Sequential Randomization Tests using e-values (betting martingales).
+Sequential Randomization Tests using e-values (betting martingales) for clinical trial monitoring.
 
-## What is this?
+## Foundation
 
-`ert` implements anytime-valid inference for randomized clinical trials. Unlike traditional p-values that require fixed sample sizes, e-values allow continuous monitoring with strict Type I error control. It is based on the framework defined by Ramdas and collaborators. Please be patient while I add references to all previous work here. This is the first public commit of an attempt to create a Rust implementation.
+This implements the betting framework for hypothesis testing developed by Ramdas, Shafer, and collaborators. The core idea comes from Duan, Ramdas & Wasserman (2022): test treatment effects by wagering on treatment assignments given observed outcomes.
 
-This is a personal side project; not ready for clinical use. Use at own risk.
+**The betting intuition:** After observing a patient's outcome but before learning their treatment assignment, we place a bet on which arm they belong to. If treatment works, outcomes should predict assignments—patients with good outcomes are more likely from the treatment arm. Under the null hypothesis (no effect), outcomes are uninformative about assignment, so no betting strategy can systematically profit. Wealth fluctuates randomly around 1.
 
-## Features
+When wealth exceeds a threshold (e.g., 20 for alpha=0.05), we reject the null. Ville's inequality guarantees Type I error control at any stopping time, regardless of when or why monitoring stops.
 
-| Module | Endpoint Type | Use Case |
-|--------|---------------|----------|
-| e-RT | Binary | Response rates, success/failure |
-| e-RTo | Continuous (bounded) | VFD, pain scores, bounded scales |
+## Paper
+
+> Zampieri FG. Sequential Randomization Tests Using e-values: Applications for trial monitoring. arXiv:2512.04366 [stat.ME]. 2026.
+
+**[Read the preprint](https://arxiv.org/abs/2512.04366)**
+
+## Methods
+
+| Method | Endpoint | Use Case |
+|--------|----------|----------|
+| e-RT | Binary | Response rates, mortality |
+| e-RTo | Continuous (bounded) | Ventilator-free days, pain scores |
 | e-RTc | Continuous (unbounded) | Biomarkers, lab values |
-| e-RTs | Survival | Time-to-event, OS, PFS |
-| e-RTms | Multi-state | ICU->Ward->Home trajectories |
-| e-RTu | Universal | Any outcome with good/bad signal |
-
-Plus CSV analyzers for real trial data with optional futility monitoring.
+| e-Survival | Time-to-event | Overall survival, PFS |
+| e-RTms | Multi-state | ICU trajectories (Ward/ICU/Home/Dead) |
 
 ## Quick Start
 
 ```bash
-# Build
 cargo build --release
-
-# Run
 cargo run --release
 ```
 
-Select a module from the menu and follow the prompts.
+See [MANUAL.md](MANUAL.md) for mathematical details and usage.
 
-## Documentation
+## Key References
 
-See [MANUAL.md](MANUAL.md) for:
-- Full mathematical formulas for each e-process
-- Parameter explanations
-- Futility monitoring details
-- Limitations and caveats
+- Ramdas A, Wang R. Hypothesis testing with e-values. Found Trends Stat 2025.
+- Duan B, Ramdas A, Wasserman L. Interactive rank testing by betting. CLeaR 2022.
+- Shafer G. Testing by betting. JRSS-A 2021.
+- Grunwald P et al. The safe logrank test. AAAI 2021.
 
-## Example
+## Disclaimer
 
-```
-==========================================
-   e-RT: Sequential Randomization Tests
-==========================================
-
-Select an option:
-  1. e-RT   (binary endpoint)
-  2. e-RTo/c (continuous endpoint)
-  3. e-RTs  (survival/time-to-event)
-  4. e-RTms (multi-state)
-  5. e-RTu  (universal/agnostic)
-  6. Analyze Binary Trial (CSV)
-  7. Analyze Continuous Trial (CSV)
-  8. Compare e-RTo vs e-RTc
-  9. Exit
-```
-
-## CSV Format
-
-For analyzing real trial data:
-
-```csv
-treatment,outcome
-1,1
-0,0
-1,0
-0,1
-```
-
-- `treatment`: 0 (control) or 1 (treatment)
-- `outcome`: 0/1 for binary, numeric for continuous
+Experimental method under development. Not for clinical use without statistical oversight.
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
-
-## Author
-
-Fernando Godinho Zampieri (fzampier@ualberta.ca)
+MIT
