@@ -1,8 +1,7 @@
-// multistate_experiment.rs - Experimental stratified e-process strategies
+// multistate_experiment.rs - Stratified e-process experiment
 //
-// Two strategies to handle bouncing:
-// 1. AVERAGE: Average e-values across strata (conservative)
-// 2. PRODUCT: Multiply e-values across strata (aggressive)
+// Demonstrates that averaging stratified e-processes recovers power
+// when patients can bounce between non-absorbing states.
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -34,7 +33,6 @@ impl MultiStateConfig {
 
 #[derive(Clone)]
 struct TransitionMatrix {
-    n_states: usize,
     probs: Vec<Vec<f64>>,
 }
 
@@ -45,7 +43,7 @@ impl TransitionMatrix {
             row[i] = 1.0;
             row
         }).collect();
-        TransitionMatrix { n_states, probs }
+        TransitionMatrix { probs }
     }
 
     fn set_row(&mut self, from: usize, probs: Vec<f64>) {
@@ -86,7 +84,6 @@ struct Stratum {
     n_good_ctrl: f64,
     n_total_ctrl: f64,
     wealth: f64,
-    n_obs: usize,  // observations in this stratum
 }
 
 impl Stratum {
@@ -97,7 +94,6 @@ impl Stratum {
             n_good_ctrl: 0.0,
             n_total_ctrl: 0.0,
             wealth: 1.0,
-            n_obs: 0,
         }
     }
 }
@@ -126,15 +122,12 @@ fn simulate_patient<R: Rng + ?Sized>(
 
 // === STRATIFIED E-PROCESS ===
 
-struct StratifiedResult {
-    avg_stop: Option<usize>,      // Average strategy crossed
-    prod_stop: Option<usize>,     // Product strategy crossed
-    original_stop: Option<usize>, // Original (unstratified) crossed
-    // Trajectories for plotting
+struct TrialResult {
+    avg_stop: Option<usize>,
+    original_stop: Option<usize>,
     original_wealth: Vec<f64>,
     avg_wealth: Vec<f64>,
-    prod_wealth: Vec<f64>,
-    strata_wealth: Vec<Vec<f64>>,  // Per-stratum trajectories
+    strata_wealth: Vec<Vec<f64>>,
 }
 
 fn run_stratified_trial<R: Rng + ?Sized>(
@@ -146,7 +139,7 @@ fn run_stratified_trial<R: Rng + ?Sized>(
     burn_in: usize,
     ramp: usize,
     threshold: f64,
-) -> StratifiedResult {
+) -> TrialResult {
     let n_states = config.n_states();
 
     // Collect all transitions
@@ -158,19 +151,18 @@ fn run_stratified_trial<R: Rng + ?Sized>(
     }
 
     if all_transitions.is_empty() {
-        return StratifiedResult {
+        return TrialResult {
             avg_stop: None,
-            prod_stop: None,
             original_stop: None,
             original_wealth: vec![1.0],
             avg_wealth: vec![1.0],
-            prod_wealth: vec![1.0],
             strata_wealth: vec![],
         };
     }
 
     // Initialize strata (one per from_state)
     let mut strata: Vec<Stratum> = (0..n_states).map(|_| Stratum::new()).collect();
+    let mut strata_n_obs: Vec<usize> = vec![0; n_states];
 
     // Original (unstratified) tracking
     let mut orig_wealth = 1.0;
@@ -180,13 +172,11 @@ fn run_stratified_trial<R: Rng + ?Sized>(
     let mut orig_n_total_ctrl = 0.0;
 
     let mut avg_stop = None;
-    let mut prod_stop = None;
     let mut original_stop = None;
 
     // Trajectory storage
     let mut original_trajectory: Vec<f64> = Vec::new();
     let mut avg_trajectory: Vec<f64> = Vec::new();
-    let mut prod_trajectory: Vec<f64> = Vec::new();
     let mut strata_trajectories: Vec<Vec<f64>> = (0..n_states).map(|_| Vec::new()).collect();
 
     for (i, trans) in all_transitions.iter().enumerate() {
@@ -196,9 +186,9 @@ fn run_stratified_trial<R: Rng + ?Sized>(
 
         // === STRATIFIED BETTING ===
         let s = &mut strata[from];
-        s.n_obs += 1;
+        strata_n_obs[from] += 1;
 
-        // Compute stratum-specific lambda (use global i for burn-in, stratum counts for rates)
+        // Compute stratum-specific lambda (use global i for burn-in)
         let s_lambda = if i >= burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
             let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
             let rate_trt = s.n_good_trt / s.n_total_trt;
@@ -232,27 +222,19 @@ fn run_stratified_trial<R: Rng + ?Sized>(
         if is_trt { orig_n_total_trt += 1.0; if is_good { orig_n_good_trt += 1.0; } }
         else { orig_n_total_ctrl += 1.0; if is_good { orig_n_good_ctrl += 1.0; } }
 
-        // === COMPUTE COMBINED STRATEGIES ===
-
-        // Average strategy: average of stratum wealths
+        // === COMPUTE AVERAGE STRATEGY ===
         let active_strata: Vec<f64> = strata.iter()
-            .filter(|s| s.n_obs > 0)
-            .map(|s| s.wealth)
+            .enumerate()
+            .filter(|(j, _)| strata_n_obs[*j] > 0)
+            .map(|(_, s)| s.wealth)
             .collect();
         let avg_wealth_now = if !active_strata.is_empty() {
             active_strata.iter().sum::<f64>() / active_strata.len() as f64
         } else { 1.0 };
 
-        // Product strategy: product of stratum wealths
-        let prod_wealth_now = strata.iter()
-            .filter(|s| s.n_obs > 0)
-            .map(|s| s.wealth)
-            .product::<f64>();
-
         // Store trajectories
         original_trajectory.push(orig_wealth);
         avg_trajectory.push(avg_wealth_now);
-        prod_trajectory.push(prod_wealth_now);
         for (j, s) in strata.iter().enumerate() {
             strata_trajectories[j].push(s.wealth);
         }
@@ -261,113 +243,23 @@ fn run_stratified_trial<R: Rng + ?Sized>(
         if avg_stop.is_none() && avg_wealth_now >= threshold {
             avg_stop = Some(i + 1);
         }
-        if prod_stop.is_none() && prod_wealth_now >= threshold {
-            prod_stop = Some(i + 1);
-        }
         if original_stop.is_none() && orig_wealth >= threshold {
             original_stop = Some(i + 1);
         }
     }
 
-    StratifiedResult {
+    TrialResult {
         avg_stop,
-        prod_stop,
         original_stop,
         original_wealth: original_trajectory,
         avg_wealth: avg_trajectory,
-        prod_wealth: prod_trajectory,
         strata_wealth: strata_trajectories,
     }
-}
-
-// === INDEPENDENT STRATA TRIAL (for verification) ===
-// Each stratum gets its own independent set of patients
-// This tests whether within-patient dependence causes product Type I inflation
-
-fn run_independent_strata_trial<R: Rng + ?Sized>(
-    rng: &mut R,
-    n_patients_per_stratum: usize,
-    p_ctrl: &TransitionMatrix,
-    p_trt: &TransitionMatrix,
-    config: &MultiStateConfig,
-    burn_in: usize,
-    ramp: usize,
-    threshold: f64,
-) -> bool {
-    let n_states = config.n_states();
-
-    // For each non-absorbing state, simulate independent patients and track wealth
-    let mut strata_wealth: Vec<f64> = Vec::new();
-
-    for from_state in 0..n_states {
-        if config.is_absorbing(from_state) {
-            continue;  // Skip absorbing states
-        }
-
-        // Simulate patients starting from this state
-        let stratum_config = MultiStateConfig {
-            state_names: config.state_names.clone(),
-            absorbing: config.absorbing.clone(),
-            start_state: from_state,  // Start from this stratum's state
-            max_days: config.max_days,
-        };
-
-        // Collect transitions only from this starting state
-        let mut transitions: Vec<Transition> = Vec::new();
-        for _ in 0..n_patients_per_stratum {
-            let arm: u8 = if rng.gen_bool(0.5) { 1 } else { 0 };
-            let p = if arm == 1 { p_trt } else { p_ctrl };
-
-            // Only take first transition (from the start state)
-            let patient_trans = simulate_patient(rng, p, &stratum_config, arm);
-            if let Some(first) = patient_trans.into_iter().next() {
-                if first.from == from_state {
-                    transitions.push(first);
-                }
-            }
-        }
-
-        // Run e-process on this stratum's transitions
-        let mut wealth = 1.0;
-        let mut n_good_trt = 0.0;
-        let mut n_total_trt = 0.0;
-        let mut n_good_ctrl = 0.0;
-        let mut n_total_ctrl = 0.0;
-
-        for (i, trans) in transitions.iter().enumerate() {
-            let is_good = is_good_transition(trans.from, trans.to);
-            let is_trt = trans.arm == 1;
-
-            let lambda = if i > burn_in && n_total_trt > 0.0 && n_total_ctrl > 0.0 {
-                let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
-                let rate_trt = n_good_trt / n_total_trt;
-                let rate_ctrl = n_good_ctrl / n_total_ctrl;
-                let delta = rate_trt - rate_ctrl;
-                if is_good { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta }
-            } else { 0.5 };
-
-            let lambda = lambda.clamp(0.01, 0.99);
-            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            wealth *= mult;
-
-            if is_trt { n_total_trt += 1.0; if is_good { n_good_trt += 1.0; } }
-            else { n_total_ctrl += 1.0; if is_good { n_good_ctrl += 1.0; } }
-        }
-
-        strata_wealth.push(wealth);
-    }
-
-    // Product of independent strata
-    let prod_wealth: f64 = strata_wealth.iter().product();
-
-    prod_wealth >= threshold
 }
 
 // === TEST SCENARIOS ===
 
 fn create_absorbing_scenario() -> (MultiStateConfig, TransitionMatrix, TransitionMatrix) {
-    // ICU-like: Dead(0), ICU(1), Ward(2), Home(3)
-    // Absorbing: Dead, Home
     let config = MultiStateConfig {
         state_names: vec!["Dead".into(), "ICU".into(), "Ward".into(), "Home".into()],
         absorbing: vec![0, 3],
@@ -391,8 +283,6 @@ fn create_absorbing_scenario() -> (MultiStateConfig, TransitionMatrix, Transitio
 }
 
 fn create_bouncing_scenario() -> (MultiStateConfig, TransitionMatrix, TransitionMatrix) {
-    // 3-state: Dead(0), Bad(1), Good(2)
-    // Only Dead is absorbing - Good can bounce back!
     let config = MultiStateConfig {
         state_names: vec!["Dead".into(), "Bad".into(), "Good".into()],
         absorbing: vec![0],
@@ -402,13 +292,13 @@ fn create_bouncing_scenario() -> (MultiStateConfig, TransitionMatrix, Transition
 
     let mut ctrl = TransitionMatrix::new(3);
     ctrl.set_row(0, vec![1.0, 0.0, 0.0]);
-    ctrl.set_row(1, vec![0.05, 0.80, 0.15]);  // Bad: 5% die, 80% stay, 15% improve
-    ctrl.set_row(2, vec![0.02, 0.08, 0.90]);  // Good: 2% die, 8% worsen, 90% stay
+    ctrl.set_row(1, vec![0.05, 0.80, 0.15]);
+    ctrl.set_row(2, vec![0.02, 0.08, 0.90]);
 
     let mut trt = TransitionMatrix::new(3);
     trt.set_row(0, vec![1.0, 0.0, 0.0]);
-    trt.set_row(1, vec![0.02, 0.80, 0.18]);   // Treatment helps Bad→Good (18% vs 15%)
-    trt.set_row(2, vec![0.02, 0.08, 0.90]);   // Same for Good state
+    trt.set_row(1, vec![0.02, 0.80, 0.18]);
+    trt.set_row(2, vec![0.02, 0.08, 0.90]);
 
     (config, ctrl, trt)
 }
@@ -418,7 +308,7 @@ fn create_bouncing_scenario() -> (MultiStateConfig, TransitionMatrix, Transition
 pub fn run() {
     println!("\n=====================================================");
     println!("   STRATIFIED E-PROCESS EXPERIMENT");
-    println!("   Comparing: Original vs Average vs Product");
+    println!("   Comparing: Original vs Stratified Average");
     println!("=====================================================\n");
 
     let n_patients = 500;
@@ -436,38 +326,31 @@ pub fn run() {
     println!("States: {:?}", config_abs.state_names);
     println!("Absorbing: {:?}", config_abs.absorbing);
 
-    // Null
     let mut rng = StdRng::seed_from_u64(seed);
-    let (mut null_orig, mut null_avg, mut null_prod) = (0, 0, 0);
+    let (mut null_orig, mut null_avg) = (0, 0);
     for _ in 0..n_sims {
         let r = run_stratified_trial(&mut rng, n_patients, &ctrl_abs, &ctrl_abs,
                                       &config_abs, burn_in, ramp, threshold);
         if r.original_stop.is_some() { null_orig += 1; }
         if r.avg_stop.is_some() { null_avg += 1; }
-        if r.prod_stop.is_some() { null_prod += 1; }
     }
 
-    // Alternative
     let mut rng = StdRng::seed_from_u64(seed + 1);
-    let (mut alt_orig, mut alt_avg, mut alt_prod) = (0, 0, 0);
+    let (mut alt_orig, mut alt_avg) = (0, 0);
     for _ in 0..n_sims {
         let r = run_stratified_trial(&mut rng, n_patients, &ctrl_abs, &trt_abs,
                                       &config_abs, burn_in, ramp, threshold);
         if r.original_stop.is_some() { alt_orig += 1; }
         if r.avg_stop.is_some() { alt_avg += 1; }
-        if r.prod_stop.is_some() { alt_prod += 1; }
     }
 
     println!("\n             Type I     Power");
     println!("Original:    {:5.2}%    {:5.1}%",
              100.0 * null_orig as f64 / n_sims as f64,
              100.0 * alt_orig as f64 / n_sims as f64);
-    println!("Average:     {:5.2}%    {:5.1}%",
+    println!("Stratified:  {:5.2}%    {:5.1}%",
              100.0 * null_avg as f64 / n_sims as f64,
              100.0 * alt_avg as f64 / n_sims as f64);
-    println!("Product:     {:5.2}%    {:5.1}%",
-             100.0 * null_prod as f64 / n_sims as f64,
-             100.0 * alt_prod as f64 / n_sims as f64);
 
     // === SCENARIO 2: BOUNCING (non-absorbing) ===
     println!("\n--- SCENARIO 2: BOUNCING STATES (Good not absorbing) ---");
@@ -475,105 +358,59 @@ pub fn run() {
     println!("States: {:?}", config_bounce.state_names);
     println!("Absorbing: {:?}", config_bounce.absorbing);
 
-    // Null
     let mut rng = StdRng::seed_from_u64(seed + 2);
-    let (mut null_orig, mut null_avg, mut null_prod) = (0, 0, 0);
+    let (mut null_orig_b, mut null_avg_b) = (0, 0);
     for _ in 0..n_sims {
         let r = run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &ctrl_bounce,
                                       &config_bounce, burn_in, ramp, threshold);
-        if r.original_stop.is_some() { null_orig += 1; }
-        if r.avg_stop.is_some() { null_avg += 1; }
-        if r.prod_stop.is_some() { null_prod += 1; }
+        if r.original_stop.is_some() { null_orig_b += 1; }
+        if r.avg_stop.is_some() { null_avg_b += 1; }
     }
 
-    // Alternative
     let mut rng = StdRng::seed_from_u64(seed + 3);
-    let (mut alt_orig, mut alt_avg, mut alt_prod) = (0, 0, 0);
+    let (mut alt_orig_b, mut alt_avg_b) = (0, 0);
     for _ in 0..n_sims {
         let r = run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &trt_bounce,
                                       &config_bounce, burn_in, ramp, threshold);
-        if r.original_stop.is_some() { alt_orig += 1; }
-        if r.avg_stop.is_some() { alt_avg += 1; }
-        if r.prod_stop.is_some() { alt_prod += 1; }
+        if r.original_stop.is_some() { alt_orig_b += 1; }
+        if r.avg_stop.is_some() { alt_avg_b += 1; }
     }
 
     println!("\n             Type I     Power");
     println!("Original:    {:5.2}%    {:5.1}%",
-             100.0 * null_orig as f64 / n_sims as f64,
-             100.0 * alt_orig as f64 / n_sims as f64);
-    println!("Average:     {:5.2}%    {:5.1}%",
-             100.0 * null_avg as f64 / n_sims as f64,
-             100.0 * alt_avg as f64 / n_sims as f64);
-    println!("Product:     {:5.2}%    {:5.1}%",
-             100.0 * null_prod as f64 / n_sims as f64,
-             100.0 * alt_prod as f64 / n_sims as f64);
-
-    // === VERIFICATION: INDEPENDENT PATIENTS PER STRATUM ===
-    println!("\n--- VERIFICATION: Product with Independent Patients ---");
-    println!("Testing if within-patient dependence causes Type I inflation...\n");
-
-    // Run bouncing scenario with independent patients per stratum
-    let mut rng = StdRng::seed_from_u64(seed + 100);
-    let (mut null_prod_indep, mut alt_prod_indep) = (0, 0);
-
-    for _ in 0..n_sims {
-        // Null: independent patients
-        let r = run_independent_strata_trial(&mut rng, n_patients,
-            &ctrl_bounce, &ctrl_bounce, &config_bounce, burn_in, ramp, threshold);
-        if r { null_prod_indep += 1; }
-    }
-
-    let mut rng = StdRng::seed_from_u64(seed + 101);
-    for _ in 0..n_sims {
-        // Alternative: independent patients
-        let r = run_independent_strata_trial(&mut rng, n_patients,
-            &ctrl_bounce, &trt_bounce, &config_bounce, burn_in, ramp, threshold);
-        if r { alt_prod_indep += 1; }
-    }
-
-    println!("Product (shared patients):      Type I = {:5.2}%",
-             100.0 * null_prod as f64 / n_sims as f64);
-    println!("Product (independent patients): Type I = {:5.2}%",
-             100.0 * null_prod_indep as f64 / n_sims as f64);
-    println!("\nIf independent Type I ≤ 5%, within-patient dependence is confirmed.");
+             100.0 * null_orig_b as f64 / n_sims as f64,
+             100.0 * alt_orig_b as f64 / n_sims as f64);
+    println!("Stratified:  {:5.2}%    {:5.1}%",
+             100.0 * null_avg_b as f64 / n_sims as f64,
+             100.0 * alt_avg_b as f64 / n_sims as f64);
 
     println!("\n=====================================================");
-    println!("   INTERPRETATION");
+    println!("   KEY INSIGHT");
     println!("=====================================================");
-    println!("- Type I should be ≤5% for valid martingale");
-    println!("- Higher power = better at detecting treatment effect");
-    println!("- Bouncing scenario tests if stratification helps");
-    println!("- Product requires independence; averaging does not");
+    println!("Average of martingales is always a martingale:");
+    println!("  E[(W_1 + W_2 + ...)/k] = 1 by linearity");
+    println!("This holds regardless of within-patient dependence.");
     println!("=====================================================\n");
 
-    // === GENERATE HTML REPORT WITH EXAMPLE TRAJECTORIES ===
-    println!("Generating HTML report with example trajectories...");
+    // === GENERATE HTML REPORT ===
+    println!("Generating HTML report...");
 
-    // Collect example trajectories for bouncing scenario
     let mut rng = StdRng::seed_from_u64(seed + 200);
-    let mut null_examples: Vec<StratifiedResult> = Vec::new();
-    let mut alt_examples: Vec<StratifiedResult> = Vec::new();
+    let mut null_examples: Vec<TrialResult> = Vec::new();
+    let mut alt_examples: Vec<TrialResult> = Vec::new();
 
-    for _ in 0..20 {
-        let r = run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &ctrl_bounce,
-                                      &config_bounce, burn_in, ramp, threshold);
-        null_examples.push(r);
+    for _ in 0..10 {
+        null_examples.push(run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &ctrl_bounce,
+                                                 &config_bounce, burn_in, ramp, threshold));
     }
-
     let mut rng = StdRng::seed_from_u64(seed + 201);
-    for _ in 0..20 {
-        let r = run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &trt_bounce,
-                                      &config_bounce, burn_in, ramp, threshold);
-        alt_examples.push(r);
+    for _ in 0..10 {
+        alt_examples.push(run_stratified_trial(&mut rng, n_patients, &ctrl_bounce, &trt_bounce,
+                                                &config_bounce, burn_in, ramp, threshold));
     }
 
-    // Generate HTML
-    let html = generate_html_report(
-        &null_examples, &alt_examples,
-        &config_bounce,
-        threshold,
-        n_patients, n_sims,
-    );
+    let html = generate_html(&null_examples, &alt_examples, &config_bounce, threshold,
+                             null_orig_b, null_avg_b, alt_orig_b, alt_avg_b, n_sims);
 
     File::create("stratified_experiment.html")
         .unwrap()
@@ -583,37 +420,39 @@ pub fn run() {
     println!(">> Saved: stratified_experiment.html");
 }
 
-fn generate_html_report(
-    null_examples: &[StratifiedResult],
-    alt_examples: &[StratifiedResult],
+fn vec_to_js(v: &[f64]) -> String {
+    let nums: Vec<String> = v.iter().map(|x| format!("{:.6}", x)).collect();
+    format!("[{}]", nums.join(","))
+}
+
+fn generate_html(
+    null_examples: &[TrialResult],
+    alt_examples: &[TrialResult],
     config: &MultiStateConfig,
     threshold: f64,
-    n_patients: usize,
+    null_orig: usize,
+    null_avg: usize,
+    alt_orig: usize,
+    alt_avg: usize,
     n_sims: usize,
 ) -> String {
-    // Convert trajectories to JSON for Plotly
-    let null_orig: Vec<&Vec<f64>> = null_examples.iter().map(|r| &r.original_wealth).collect();
-    let null_avg: Vec<&Vec<f64>> = null_examples.iter().map(|r| &r.avg_wealth).collect();
-    let alt_orig: Vec<&Vec<f64>> = alt_examples.iter().map(|r| &r.original_wealth).collect();
-    let alt_avg: Vec<&Vec<f64>> = alt_examples.iter().map(|r| &r.avg_wealth).collect();
+    // Build JS arrays for trajectories
+    let null_orig_js: Vec<String> = null_examples.iter().map(|r| vec_to_js(&r.original_wealth)).collect();
+    let null_avg_js: Vec<String> = null_examples.iter().map(|r| vec_to_js(&r.avg_wealth)).collect();
+    let alt_orig_js: Vec<String> = alt_examples.iter().map(|r| vec_to_js(&r.original_wealth)).collect();
+    let alt_avg_js: Vec<String> = alt_examples.iter().map(|r| vec_to_js(&r.avg_wealth)).collect();
 
-    // Get strata names (non-absorbing only)
-    let strata_names: Vec<&String> = config.state_names.iter()
+    // Strata from first alt example (only non-absorbing)
+    let strata_js: Vec<String> = alt_examples[0].strata_wealth.iter()
         .enumerate()
         .filter(|(i, _)| !config.absorbing.contains(i))
-        .map(|(_, name)| name)
+        .map(|(_, v)| vec_to_js(v))
         .collect();
-
-    // Example strata trajectories from first alternative trial
-    let example_strata: Vec<&Vec<f64>> = if !alt_examples.is_empty() {
-        alt_examples[0].strata_wealth.iter()
-            .enumerate()
-            .filter(|(i, _)| !config.absorbing.contains(i))
-            .map(|(_, v)| v)
-            .collect()
-    } else {
-        vec![]
-    };
+    let strata_names: Vec<&str> = config.state_names.iter()
+        .enumerate()
+        .filter(|(i, _)| !config.absorbing.contains(i))
+        .map(|(_, n)| n.as_str())
+        .collect();
 
     format!(r#"<!DOCTYPE html>
 <html><head>
@@ -621,7 +460,7 @@ fn generate_html_report(
 <title>Stratified e-RTms Experiment</title>
 <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
 <style>
-body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 1600px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
+body {{ font-family: system-ui, sans-serif; max-width: 1400px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
 h1 {{ color: #1a1a2e; border-bottom: 3px solid #4a90d9; padding-bottom: 10px; }}
 h2 {{ color: #16213e; margin-top: 30px; }}
 .summary {{ background: #fff; padding: 20px; border-radius: 8px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
@@ -630,138 +469,112 @@ h2 {{ color: #16213e; margin-top: 30px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #ddd; padding: 10px; text-align: center; }}
 th {{ background: #4a90d9; color: white; }}
-tr:nth-child(even) {{ background: #f9f9f9; }}
 .good {{ color: #27ae60; font-weight: bold; }}
 .bad {{ color: #e74c3c; font-weight: bold; }}
-.note {{ background: #fffde7; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; }}
+.note {{ background: #e8f4fd; padding: 15px; border-left: 4px solid #4a90d9; margin: 20px 0; border-radius: 4px; }}
 </style>
 </head>
 <body>
 
-<h1>Stratified e-RTms Experiment</h1>
+<h1>Stratified e-RTms: Averaging Recovers Power</h1>
 
 <div class="summary">
-<h2>Summary</h2>
-<p><strong>Scenario:</strong> Bouncing states (Good not absorbing)</p>
-<p><strong>States:</strong> {state_names}</p>
-<p><strong>Parameters:</strong> N={n_patients}, {n_sims} simulations, threshold={threshold}</p>
+<h2>Bouncing Scenario Results</h2>
+<p><strong>States:</strong> {states} (only Dead is absorbing)</p>
+<p><strong>Problem:</strong> Patients bounce between Bad and Good, diluting treatment signal.</p>
 
 <table>
 <tr><th>Strategy</th><th>Type I Error</th><th>Power</th><th>Valid?</th></tr>
-<tr><td>Original (unstratified)</td><td>~0%</td><td class="bad">~7%</td><td class="good">Yes</td></tr>
-<tr><td>Average (stratified)</td><td>~3.6%</td><td class="good">~98%</td><td class="good">Yes</td></tr>
-<tr><td>Product (stratified)</td><td class="bad">~7%</td><td class="good">~99%</td><td class="bad">No*</td></tr>
+<tr>
+  <td>Original (unstratified)</td>
+  <td>{null_orig_pct:.1}%</td>
+  <td class="bad">{alt_orig_pct:.1}%</td>
+  <td class="good">Yes</td>
+</tr>
+<tr>
+  <td>Stratified Average</td>
+  <td>{null_avg_pct:.1}%</td>
+  <td class="good">{alt_avg_pct:.1}%</td>
+  <td class="good">Yes</td>
+</tr>
 </table>
-<p><small>*Product fails due to within-patient dependence across strata (Cov > 0)</small></p>
 </div>
 
 <div class="note">
-<strong>Key Finding:</strong> Averaging stratified e-processes recovers power from 7% to 98% while maintaining valid Type I control.
-The product strategy has inflated Type I due to positive covariance between strata from the same patient.
+<strong>Why it works:</strong> Each stratum (from Bad, from Good) runs its own e-process.
+The average E[(W_1 + W_2)/2] = 1 under H0 by linearity of expectation, regardless of dependence.
 </div>
 
-<h2>Null Hypothesis (H0: No Treatment Effect)</h2>
+<h2>Null Hypothesis Trajectories</h2>
 <div class="grid">
-<div class="plot"><div id="null_orig" style="height:350px"></div></div>
-<div class="plot"><div id="null_avg" style="height:350px"></div></div>
+<div class="plot"><div id="null_orig" style="height:300px"></div></div>
+<div class="plot"><div id="null_avg" style="height:300px"></div></div>
 </div>
 
-<h2>Alternative Hypothesis (H1: Treatment Helps)</h2>
+<h2>Alternative Hypothesis Trajectories</h2>
 <div class="grid">
-<div class="plot"><div id="alt_orig" style="height:350px"></div></div>
-<div class="plot"><div id="alt_avg" style="height:350px"></div></div>
+<div class="plot"><div id="alt_orig" style="height:300px"></div></div>
+<div class="plot"><div id="alt_avg" style="height:300px"></div></div>
 </div>
 
-<h2>Per-Stratum Wealth (Single Trial Example)</h2>
-<div class="plot"><div id="strata" style="height:400px"></div></div>
-
-<div class="note">
-<strong>Why Averaging Works:</strong><br>
-Each stratum (transitions from state X) has its own e-process with E[W_i] = 1 under H0.<br>
-Average: E[(W_1 + W_2 + ...)/k] = 1 by linearity of expectation (regardless of dependence).<br>
-Product: E[W_1 × W_2 × ...] ≠ 1 when strata are correlated (same patient → Cov > 0).
-</div>
+<h2>Per-Stratum Wealth (Example Trial)</h2>
+<div class="plot"><div id="strata" style="height:350px"></div></div>
 
 <script>
 var threshold = {threshold};
+var colors = ['rgba(150,150,150,0.6)', 'rgba(70,130,180,0.6)', 'rgba(46,204,113,0.6)'];
 
-// Null - Original
-var nullOrig = {null_orig:?};
-Plotly.newPlot('null_orig', nullOrig.map((y,i) => ({{
-    type: 'scatter', y: y, mode: 'lines',
-    line: {{ color: 'rgba(150,150,150,0.5)' }}, showlegend: false
-}})), {{
-    title: 'Null: Original (Unstratified)',
-    yaxis: {{ type: 'log', title: 'e-value', range: [-1, 2] }},
-    xaxis: {{ title: 'Transition' }},
-    shapes: [{{ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: threshold, y1: threshold,
-               line: {{ color: 'green', dash: 'dash', width: 2 }} }}]
+function plotTraces(divId, data, title, color) {{
+    var traces = data.map(function(y) {{
+        return {{ type: 'scatter', y: y, mode: 'lines', line: {{ color: color, width: 1.5 }}, showlegend: false }};
+    }});
+    Plotly.newPlot(divId, traces, {{
+        title: title,
+        yaxis: {{ type: 'log', title: 'e-value', range: [-1, 2.5] }},
+        xaxis: {{ title: 'Transition' }},
+        shapes: [{{ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: threshold, y1: threshold,
+                   line: {{ color: 'green', dash: 'dash', width: 2 }} }}]
+    }});
+}}
+
+var nullOrig = [{null_orig_js}];
+var nullAvg = [{null_avg_js}];
+var altOrig = [{alt_orig_js}];
+var altAvg = [{alt_avg_js}];
+
+plotTraces('null_orig', nullOrig, 'Null: Original (stays flat)', 'rgba(150,150,150,0.6)');
+plotTraces('null_avg', nullAvg, 'Null: Stratified Average (stays flat)', 'rgba(70,130,180,0.6)');
+plotTraces('alt_orig', altOrig, 'Alt: Original (FAILS - no power)', 'rgba(150,150,150,0.6)');
+plotTraces('alt_avg', altAvg, 'Alt: Stratified Average (WORKS!)', 'rgba(46,204,113,0.6)');
+
+// Strata plot
+var strataData = [{strata_js}];
+var strataNames = {strata_names_js};
+var strataColors = ['#e74c3c', '#3498db', '#27ae60'];
+var strataTraces = strataData.map(function(y, i) {{
+    return {{ type: 'scatter', y: y, mode: 'lines', name: 'From: ' + strataNames[i],
+              line: {{ color: strataColors[i], width: 2 }} }};
 }});
-
-// Null - Average
-var nullAvg = {null_avg:?};
-Plotly.newPlot('null_avg', nullAvg.map((y,i) => ({{
-    type: 'scatter', y: y, mode: 'lines',
-    line: {{ color: 'rgba(70,130,180,0.5)' }}, showlegend: false
-}})), {{
-    title: 'Null: Average (Stratified)',
-    yaxis: {{ type: 'log', title: 'e-value', range: [-1, 2] }},
-    xaxis: {{ title: 'Transition' }},
-    shapes: [{{ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: threshold, y1: threshold,
-               line: {{ color: 'green', dash: 'dash', width: 2 }} }}]
-}});
-
-// Alt - Original
-var altOrig = {alt_orig:?};
-Plotly.newPlot('alt_orig', altOrig.map((y,i) => ({{
-    type: 'scatter', y: y, mode: 'lines',
-    line: {{ color: 'rgba(150,150,150,0.5)' }}, showlegend: false
-}})), {{
-    title: 'Alternative: Original (Unstratified) - FAILS',
-    yaxis: {{ type: 'log', title: 'e-value', range: [-1, 2] }},
-    xaxis: {{ title: 'Transition' }},
-    shapes: [{{ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: threshold, y1: threshold,
-               line: {{ color: 'green', dash: 'dash', width: 2 }} }}]
-}});
-
-// Alt - Average
-var altAvg = {alt_avg:?};
-Plotly.newPlot('alt_avg', altAvg.map((y,i) => ({{
-    type: 'scatter', y: y, mode: 'lines',
-    line: {{ color: 'rgba(46,204,113,0.6)' }}, showlegend: false
-}})), {{
-    title: 'Alternative: Average (Stratified) - WORKS!',
-    yaxis: {{ type: 'log', title: 'e-value', range: [-1, 3] }},
-    xaxis: {{ title: 'Transition' }},
-    shapes: [{{ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: threshold, y1: threshold,
-               line: {{ color: 'green', dash: 'dash', width: 2 }} }}]
-}});
-
-// Strata example
-var strataData = {example_strata:?};
-var strataNames = {strata_names:?};
-var colors = ['#e74c3c', '#3498db', '#27ae60', '#9b59b6', '#f39c12'];
-Plotly.newPlot('strata', strataData.map((y, i) => ({{
-    type: 'scatter', y: y, mode: 'lines', name: 'From: ' + strataNames[i],
-    line: {{ color: colors[i % colors.length], width: 2 }}
-}})), {{
-    title: 'Individual Stratum Wealth Trajectories (One Trial)',
-    yaxis: {{ type: 'log', title: 'Stratum Wealth' }},
+Plotly.newPlot('strata', strataTraces, {{
+    title: 'Individual Stratum Wealth (one trial under H1)',
+    yaxis: {{ type: 'log', title: 'Wealth' }},
     xaxis: {{ title: 'Transition' }},
     legend: {{ x: 0.02, y: 0.98 }}
 }});
 </script>
 
 </body></html>"#,
-        state_names = config.state_names.join(" → "),
-        n_patients = n_patients,
-        n_sims = n_sims,
+        states = config.state_names.join(" < "),
         threshold = threshold,
-        null_orig = format!("{:?}", null_orig),
-        null_avg = format!("{:?}", null_avg),
-        alt_orig = format!("{:?}", alt_orig),
-        alt_avg = format!("{:?}", alt_avg),
-        example_strata = format!("{:?}", example_strata),
-        strata_names = format!("{:?}", strata_names),
+        null_orig_pct = 100.0 * null_orig as f64 / n_sims as f64,
+        null_avg_pct = 100.0 * null_avg as f64 / n_sims as f64,
+        alt_orig_pct = 100.0 * alt_orig as f64 / n_sims as f64,
+        alt_avg_pct = 100.0 * alt_avg as f64 / n_sims as f64,
+        null_orig_js = null_orig_js.join(","),
+        null_avg_js = null_avg_js.join(","),
+        alt_orig_js = alt_orig_js.join(","),
+        alt_avg_js = alt_avg_js.join(","),
+        strata_js = strata_js.join(","),
+        strata_names_js = format!("{:?}", strata_names),
     )
 }
