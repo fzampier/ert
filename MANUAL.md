@@ -19,7 +19,8 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTu | 5 | Universal/agnostic | Rate Difference |
 | Analyze Binary | 6 | Real trial CSV (binary) | RD, OR |
 | Analyze Continuous | 7 | Real trial CSV (continuous) | Mean Diff, d |
-| Compare Methods | 8 | e-RTo vs e-RTc comparison | Both |
+| Analyze Survival | 8 | Real trial CSV (survival) | HR |
+| Compare Methods | 9 | e-RTo vs e-RTc comparison | Both |
 
 ---
 
@@ -415,9 +416,47 @@ treatment,outcome
 
 ---
 
-### 9. Compare e-RTo vs e-RTc
+### 9. Analyze Survival Trial (CSV)
 
 **Menu option:** 8
+
+**CLI:** `ert analyze-survival <file.csv> [options]`
+
+**Use case:** Analyze real clinical trial data with time-to-event outcomes.
+
+**CSV format:**
+```
+treatment,time,status
+1,12.5,1
+0,8.3,0
+1,24.0,0
+...
+```
+- `treatment`: 0 (control) or 1 (treatment)
+- `time`: Time to event or censoring
+- `status`: 1 (event) or 0 (censored)
+
+**Uses e-RTs formula** with fixed wager (λ_max = 0.25).
+
+**Parameters:**
+- `Burn-in`: Initial events before betting starts (default 30)
+- `Ramp`: Gradual increase to full betting (default 50)
+- `Success threshold`: e-value for rejection (default 20)
+
+**Output:**
+- e-value trajectory (by event number)
+- HR at crossing (event ratio)
+- Final HR with 95% CI (person-time adjusted)
+- Type M error (effect magnification at early stopping)
+- HTML report with trajectory plots
+
+**Note:** HR at crossing uses event ratio as a simple proxy. Crude person-time HR can be misleading at early interim analyses due to differential follow-up.
+
+---
+
+### 10. Compare e-RTo vs e-RTc
+
+**Menu option:** 9
 
 Runs both methods on identical simulated data to compare Type I error and power.
 
@@ -504,6 +543,7 @@ Reports use:
 | `agnostic_report.html` | e-RTu simulation |
 | `binary_analysis_report.html` | Analyze Binary (CSV) |
 | `continuous_analysis_report.html` | Analyze Continuous (CSV) |
+| `survival_analysis_report.html` | Analyze Survival (CSV) |
 | `comparison_report.html` | Compare Methods |
 
 ---
