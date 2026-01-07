@@ -1,3 +1,10 @@
+// multistate.rs - Flexible ordinal multi-state e-process (e-RTms)
+//
+// User configures:
+// - N states ordered worst→best
+// - Which states are absorbing
+// - Transition matrices for control and treatment
+
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -5,64 +12,137 @@ use rand::RngCore;
 use std::fs::File;
 use std::io::{self, Write};
 
-use crate::ert_core::{get_input, get_input_usize, get_optional_input, chrono_lite, normal_cdf, normal_quantile};
+use crate::ert_core::{get_input, get_input_usize, get_string, get_optional_input, chrono_lite, normal_cdf, normal_quantile};
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
-// === STATES ===
-
-const STATE_WARD: usize = 0;
-const STATE_ICU: usize = 1;
-const STATE_HOME: usize = 2;
-const STATE_DEAD: usize = 3;
-
-// === DATA ===
+// === CONFIGURATION ===
 
 #[derive(Clone)]
-struct TransitionMatrix {
-    probs: [[f64; 4]; 4],
+pub struct MultiStateConfig {
+    pub state_names: Vec<String>,  // Ordered worst→best
+    pub absorbing: Vec<usize>,     // Indices of absorbing states
+    pub start_state: usize,
+    pub max_days: usize,
+}
+
+impl MultiStateConfig {
+    pub fn n_states(&self) -> usize {
+        self.state_names.len()
+    }
+
+    pub fn is_absorbing(&self, state: usize) -> bool {
+        self.absorbing.contains(&state)
+    }
+
+    // ICU preset: Dead(0), ICU(1), Ward(2), Home(3)
+    pub fn icu_preset() -> Self {
+        MultiStateConfig {
+            state_names: vec!["Dead".into(), "ICU".into(), "Ward".into(), "Home".into()],
+            absorbing: vec![0, 3],  // Dead and Home
+            start_state: 1,         // ICU
+            max_days: 28,
+        }
+    }
+}
+
+// === TRANSITION MATRIX ===
+
+#[derive(Clone)]
+pub struct TransitionMatrix {
+    pub n_states: usize,
+    pub probs: Vec<Vec<f64>>,
 }
 
 impl TransitionMatrix {
-    fn new(probs: [[f64; 4]; 4]) -> Self { TransitionMatrix { probs } }
-
-    fn default_control() -> Self {
-        TransitionMatrix::new([
-            [0.880, 0.070, 0.030, 0.020], // Ward
-            [0.070, 0.915, 0.000, 0.015], // ICU
-            [0.000, 0.000, 1.000, 0.000], // Home (absorbing)
-            [0.000, 0.000, 0.000, 1.000], // Dead (absorbing)
-        ])
+    pub fn new(n_states: usize) -> Self {
+        // Initialize with identity (stay in same state)
+        let probs = (0..n_states).map(|i| {
+            let mut row = vec![0.0; n_states];
+            row[i] = 1.0;
+            row
+        }).collect();
+        TransitionMatrix { n_states, probs }
     }
 
-    fn default_treatment() -> Self {
-        TransitionMatrix::new([
-            [0.870, 0.050, 0.050, 0.030], // Ward
-            [0.090, 0.900, 0.000, 0.010], // ICU
-            [0.000, 0.000, 1.000, 0.000], // Home
-            [0.000, 0.000, 0.000, 1.000], // Dead
-        ])
+    pub fn set_row(&mut self, from: usize, probs: Vec<f64>) {
+        if from < self.n_states && probs.len() == self.n_states {
+            self.probs[from] = probs;
+        }
     }
 
-    // Small realistic effect: ~5% absolute improvement in Home at day 28
-    fn small_treatment() -> Self {
-        TransitionMatrix::new([
-            [0.875, 0.060, 0.040, 0.025], // Ward: slightly better discharge
-            [0.080, 0.907, 0.000, 0.013], // ICU: 8% vs 7% step-down rate
-            [0.000, 0.000, 1.000, 0.000], // Home
-            [0.000, 0.000, 0.000, 1.000], // Dead
-        ])
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, row) in self.probs.iter().enumerate() {
+            let sum: f64 = row.iter().sum();
+            if (sum - 1.0).abs() > 0.01 {
+                return Err(format!("Row {} sums to {:.3}, expected 1.0", i, sum));
+            }
+        }
+        Ok(())
     }
 
-    fn sample_next<R: Rng + ?Sized>(&self, rng: &mut R, current: usize) -> usize {
+    pub fn sample_next<R: Rng + ?Sized>(&self, rng: &mut R, current: usize) -> usize {
         let r: f64 = rng.gen();
         let mut cumsum = 0.0;
         for (next_state, &prob) in self.probs[current].iter().enumerate() {
             cumsum += prob;
-            if r < cumsum { return next_state; }
+            if r < cumsum {
+                return next_state;
+            }
         }
         current
     }
+
+    // ICU preset: Control (no treatment effect)
+    pub fn icu_control() -> Self {
+        let mut m = TransitionMatrix::new(4);
+        // Dead (absorbing)
+        m.set_row(0, vec![1.0, 0.0, 0.0, 0.0]);
+        // ICU -> ICU(91.5%), Ward(7%), Dead(1.5%)
+        m.set_row(1, vec![0.015, 0.915, 0.070, 0.000]);
+        // Ward -> Dead(2%), ICU(7%), Ward(88%), Home(3%)
+        m.set_row(2, vec![0.020, 0.070, 0.880, 0.030]);
+        // Home (absorbing)
+        m.set_row(3, vec![0.0, 0.0, 0.0, 1.0]);
+        m
+    }
+
+    // ICU preset: Large treatment effect (OR~1.6, +15% Home)
+    pub fn icu_treatment_large() -> Self {
+        let mut m = TransitionMatrix::new(4);
+        m.set_row(0, vec![1.0, 0.0, 0.0, 0.0]);
+        // ICU -> better step-down (9% vs 7%)
+        m.set_row(1, vec![0.010, 0.900, 0.090, 0.000]);
+        // Ward -> better discharge (5% vs 3%), less death
+        m.set_row(2, vec![0.030, 0.050, 0.870, 0.050]);
+        m.set_row(3, vec![0.0, 0.0, 0.0, 1.0]);
+        m
+    }
+
+    // ICU preset: Small treatment effect (OR~1.2, +5% Home)
+    pub fn icu_treatment_small() -> Self {
+        let mut m = TransitionMatrix::new(4);
+        m.set_row(0, vec![1.0, 0.0, 0.0, 0.0]);
+        m.set_row(1, vec![0.013, 0.907, 0.080, 0.000]);
+        m.set_row(2, vec![0.025, 0.060, 0.875, 0.040]);
+        m.set_row(3, vec![0.0, 0.0, 0.0, 1.0]);
+        m
+    }
 }
+
+// === TRANSITION CLASSIFICATION ===
+
+// Good = moving to higher-indexed (better) state
+fn is_good_transition(from: usize, to: usize) -> bool {
+    to > from
+}
+
+// Bad = moving to lower-indexed (worse) state
+#[allow(dead_code)]
+fn is_bad_transition(from: usize, to: usize) -> bool {
+    to < from
+}
+
+// === DATA STRUCTURES ===
 
 struct Transition {
     from: usize,
@@ -80,54 +160,54 @@ struct Trial {
 
 // === PROPORTIONAL ODDS BENCHMARK ===
 
-fn calculate_proportional_or(ctrl: [f64; 4], trt: [f64; 4]) -> f64 {
-    // Reorder by ordinal score (worst to best): Dead, ICU, Ward, Home
-    let ctrl_ord = [ctrl[3], ctrl[1], ctrl[0], ctrl[2]];
-    let trt_ord = [trt[3], trt[1], trt[0], trt[2]];
+fn calculate_proportional_or(ctrl: &[f64], trt: &[f64]) -> f64 {
+    let n = ctrl.len();
+    if n < 2 { return 1.0; }
 
-    let mut cum_ctrl = [0.0; 4];
-    let mut cum_trt = [0.0; 4];
-    cum_ctrl[0] = ctrl_ord[0];
-    cum_trt[0] = trt_ord[0];
-    for i in 1..4 {
-        cum_ctrl[i] = cum_ctrl[i-1] + ctrl_ord[i];
-        cum_trt[i] = cum_trt[i-1] + trt_ord[i];
+    // States are ordered worst→best, so cumulative from worst
+    let mut cum_ctrl = vec![0.0; n];
+    let mut cum_trt = vec![0.0; n];
+    cum_ctrl[0] = ctrl[0];
+    cum_trt[0] = trt[0];
+    for i in 1..n {
+        cum_ctrl[i] = cum_ctrl[i-1] + ctrl[i];
+        cum_trt[i] = cum_trt[i-1] + trt[i];
     }
 
     let mut log_ors = Vec::new();
-    for i in 0..3 {
+    for i in 0..(n-1) {
         let p_ctrl = cum_ctrl[i].clamp(0.001, 0.999);
         let p_trt = cum_trt[i].clamp(0.001, 0.999);
         let or_j = (p_trt / (1.0 - p_trt)) / (p_ctrl / (1.0 - p_ctrl));
-        if or_j > 0.0 { log_ors.push(or_j.ln()); }
+        if or_j > 0.0 {
+            log_ors.push(or_j.ln());
+        }
     }
 
     if log_ors.is_empty() { return 1.0; }
     let mean_log_or = log_ors.iter().sum::<f64>() / log_ors.len() as f64;
-    (-mean_log_or).exp()
+    (-mean_log_or).exp()  // Flip for "treatment better" interpretation
 }
 
-fn calculate_mann_whitney_prob(ctrl: [f64; 4], trt: [f64; 4]) -> f64 {
-    let ctrl_ord = [ctrl[3], ctrl[1], ctrl[0], ctrl[2]];
-    let trt_ord = [trt[3], trt[1], trt[0], trt[2]];
-
+fn calculate_mann_whitney_prob(ctrl: &[f64], trt: &[f64]) -> f64 {
+    let n = ctrl.len();
     let mut p_win = 0.0;
     let mut p_tie = 0.0;
-    for i in 0..4 {
-        for j in 0..4 {
-            let p_joint = trt_ord[i] * ctrl_ord[j];
-            if i > j { p_win += p_joint; }
+    for i in 0..n {
+        for j in 0..n {
+            let p_joint = trt[i] * ctrl[j];
+            if i > j { p_win += p_joint; }  // Higher index = better
             else if i == j { p_tie += p_joint; }
         }
     }
     p_win + 0.5 * p_tie
 }
 
-fn proportional_odds_power(or: f64, n_total: usize, alpha: f64) -> f64 {
+fn proportional_odds_power(or: f64, n_total: usize, n_states: usize, alpha: f64) -> f64 {
     if or <= 1.0 { return alpha; }
     let log_or = or.ln();
     let n = n_total as f64;
-    let k = 4.0;
+    let k = n_states as f64;
     let var_log_or = 4.0 * (k + 1.0) / (3.0 * n);
     let se_log_or = var_log_or.sqrt();
     let z = log_or / se_log_or;
@@ -135,26 +215,29 @@ fn proportional_odds_power(or: f64, n_total: usize, alpha: f64) -> f64 {
     normal_cdf(z - z_alpha)
 }
 
-fn proportional_odds_sample_size(or: f64, power: f64, alpha: f64) -> usize {
+fn proportional_odds_sample_size(or: f64, n_states: usize, power: f64, alpha: f64) -> usize {
     if or <= 1.0 { return 99999; }
     let log_or = or.ln();
     let z_alpha = normal_quantile(1.0 - alpha / 2.0);
     let z_beta = normal_quantile(power);
-    let k = 4.0;
+    let k = n_states as f64;
     let n = 4.0 * (k + 1.0) / (3.0 * log_or * log_or) * (z_alpha + z_beta).powi(2);
     (n.ceil() as usize).max(10)
 }
 
-// === SIMULATE ===
+// === SIMULATION ===
 
 fn simulate_patient<R: Rng + ?Sized>(
-    rng: &mut R, p: &TransitionMatrix, arm: u8, max_days: usize, start_state: usize,
+    rng: &mut R,
+    p: &TransitionMatrix,
+    config: &MultiStateConfig,
+    arm: u8,
 ) -> Vec<Transition> {
-    let mut state = start_state;
+    let mut state = config.start_state;
     let mut transitions = Vec::new();
 
-    for _ in 1..=max_days {
-        if state == STATE_HOME || state == STATE_DEAD { break; }
+    for _ in 1..=config.max_days {
+        if config.is_absorbing(state) { break; }
         let new_state = p.sample_next(rng, state);
         if new_state != state {
             transitions.push(Transition { from: state, to: new_state, arm });
@@ -164,24 +247,32 @@ fn simulate_patient<R: Rng + ?Sized>(
     transitions
 }
 
-fn is_good_transition(from: usize, to: usize) -> bool {
-    (from == STATE_ICU && to == STATE_WARD) || (from == STATE_WARD && to == STATE_HOME)
-}
-
 fn run_single_trial<R: Rng + ?Sized>(
-    rng: &mut R, n_patients: usize, p_ctrl: &TransitionMatrix, p_trt: &TransitionMatrix,
-    max_days: usize, start_state: usize, burn_in: usize, ramp: usize, threshold: f64,
+    rng: &mut R,
+    n_patients: usize,
+    p_ctrl: &TransitionMatrix,
+    p_trt: &TransitionMatrix,
+    config: &MultiStateConfig,
+    burn_in: usize,
+    ramp: usize,
+    threshold: f64,
 ) -> (Trial, Vec<f64>) {
     let mut all_transitions: Vec<Transition> = Vec::new();
 
     for _ in 0..n_patients {
         let arm: u8 = if rng.gen_bool(0.5) { 1 } else { 0 };
         let p = if arm == 1 { p_trt } else { p_ctrl };
-        all_transitions.extend(simulate_patient(rng, p, arm, max_days, start_state));
+        all_transitions.extend(simulate_patient(rng, p, config, arm));
     }
 
     if all_transitions.len() < burn_in {
-        return (Trial { stop_n: None, agnostic_stop_n: None, effect_at_stop: 0.0, effect_final: 0.0, min_wealth: 1.0 }, vec![1.0]);
+        return (Trial {
+            stop_n: None,
+            agnostic_stop_n: None,
+            effect_at_stop: 0.0,
+            effect_final: 0.0,
+            min_wealth: 1.0
+        }, vec![1.0]);
     }
 
     // Compute wealth
@@ -219,7 +310,7 @@ fn run_single_trial<R: Rng + ?Sized>(
     let effect_final = *effects.last().unwrap_or(&0.0);
     let min_wealth = wealth.iter().cloned().fold(f64::INFINITY, f64::min);
 
-    // Agnostic e-RT
+    // Agnostic e-RT in parallel
     let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
     let mut agnostic_stop_n = None;
     for (i, trans) in all_transitions.iter().enumerate() {
@@ -236,18 +327,25 @@ fn run_single_trial<R: Rng + ?Sized>(
     (Trial { stop_n, agnostic_stop_n, effect_at_stop, effect_final, min_wealth }, wealth)
 }
 
-fn compute_day28<R: Rng + ?Sized>(rng: &mut R, p: &TransitionMatrix, n: usize, max_days: usize, start: usize) -> [f64; 4] {
-    let mut counts = [0usize; 4];
-    for _ in 0..n {
-        let mut state = start;
-        for _ in 1..=max_days {
-            if state == STATE_HOME || state == STATE_DEAD { break; }
+fn compute_day_n<R: Rng + ?Sized>(
+    rng: &mut R,
+    p: &TransitionMatrix,
+    config: &MultiStateConfig,
+    n_patients: usize,
+) -> Vec<f64> {
+    let mut counts = vec![0usize; config.n_states()];
+
+    for _ in 0..n_patients {
+        let mut state = config.start_state;
+        for _ in 1..=config.max_days {
+            if config.is_absorbing(state) { break; }
             state = p.sample_next(rng, state);
         }
         counts[state] += 1;
     }
-    let n = n as f64;
-    [counts[0] as f64 / n, counts[1] as f64 / n, counts[2] as f64 / n, counts[3] as f64 / n]
+
+    let n = n_patients as f64;
+    counts.iter().map(|&c| c as f64 / n).collect()
 }
 
 // === FUTILITY GRID ===
@@ -263,6 +361,32 @@ fn compute_futility_grid(trials: &[Trial], thresholds: &[f64]) -> Vec<(f64, f64,
     }).collect()
 }
 
+// === INPUT HELPERS ===
+
+fn get_transition_matrix(n_states: usize, name: &str, state_names: &[String]) -> TransitionMatrix {
+    println!("\n--- {} Transition Matrix ---", name);
+    println!("Enter probabilities for each row (must sum to 1.0)");
+
+    let mut m = TransitionMatrix::new(n_states);
+
+    for from in 0..n_states {
+        println!("\nFrom {} (state {}):", state_names[from], from);
+        let mut probs = Vec::new();
+        for to in 0..n_states {
+            let prompt = format!("  → {} ({}): ", state_names[to], to);
+            let p: f64 = get_input(&prompt);
+            probs.push(p);
+        }
+        m.set_row(from, probs);
+    }
+
+    if let Err(e) = m.validate() {
+        println!("Warning: {}", e);
+    }
+
+    m
+}
+
 // === MAIN ===
 
 pub fn run() {
@@ -270,54 +394,99 @@ pub fn run() {
     println!("   e-RTms MULTI-STATE SIMULATION");
     println!("==========================================\n");
 
-    println!("Model: Ward, ICU, Home (abs), Dead (abs)");
-    println!("Start: ICU | Follow-up: 28 days\n");
+    // Configuration choice
+    println!("Configuration:");
+    println!("  1. ICU preset (Dead/ICU/Ward/Home)");
+    println!("  2. Custom states");
+    let config_choice = get_input_usize("Select (1 or 2): ");
 
-    println!("Effect size:");
-    println!("  1. Large (OR~1.6, Home +15%)");
-    println!("  2. Small (OR~1.2, Home +5%) - more realistic");
-    let effect_choice = get_input_usize("Select (1 or 2): ");
-    let (p_ctrl, p_trt) = if effect_choice == 2 {
-        println!("Using small effect: ICU->Ward 7%→8%");
-        (TransitionMatrix::default_control(), TransitionMatrix::small_treatment())
+    let (config, p_ctrl, p_trt) = if config_choice == 2 {
+        // Custom configuration
+        let n_states = get_input_usize("\nNumber of states: ");
+
+        println!("\nEnter state names (ordered WORST to BEST):");
+        let mut state_names = Vec::new();
+        for i in 0..n_states {
+            let name = get_string(&format!("  State {} name: ", i));
+            state_names.push(name);
+        }
+
+        println!("\nWhich states are absorbing? (comma-separated indices, e.g., 0,{}):", n_states - 1);
+        let absorbing_str = get_string("Absorbing states: ");
+        let absorbing: Vec<usize> = absorbing_str
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+
+        let start_state = get_input_usize(&format!("Starting state (0-{}): ", n_states - 1));
+        let max_days = get_input_usize("Follow-up days: ");
+
+        let config = MultiStateConfig {
+            state_names: state_names.clone(),
+            absorbing,
+            start_state,
+            max_days,
+        };
+
+        let p_ctrl = get_transition_matrix(n_states, "Control", &state_names);
+        let p_trt = get_transition_matrix(n_states, "Treatment", &state_names);
+
+        (config, p_ctrl, p_trt)
     } else {
-        println!("Using large effect: ICU->Ward 7%→9%");
-        (TransitionMatrix::default_control(), TransitionMatrix::default_treatment())
+        // ICU preset
+        println!("\nUsing ICU preset: Dead(0) < ICU(1) < Ward(2) < Home(3)");
+        println!("Absorbing: Dead, Home | Start: ICU | Days: 28\n");
+
+        println!("Effect size:");
+        println!("  1. Large (OR~1.6, Home +15%)");
+        println!("  2. Small (OR~1.2, Home +5%)");
+        let effect_choice = get_input_usize("Select (1 or 2): ");
+
+        let config = MultiStateConfig::icu_preset();
+        let p_ctrl = TransitionMatrix::icu_control();
+        let p_trt = if effect_choice == 2 {
+            println!("Using small effect");
+            TransitionMatrix::icu_treatment_small()
+        } else {
+            println!("Using large effect");
+            TransitionMatrix::icu_treatment_large()
+        };
+
+        (config, p_ctrl, p_trt)
     };
 
+    // Simulation parameters
     let n_patients = get_input_usize("\nPatients per trial (e.g., 1000): ");
     let n_sims = get_input_usize("Simulations (e.g., 1000): ");
-    let threshold = get_input("Threshold (default 20): ");
+    let threshold: f64 = get_input("Threshold (default 20): ");
     let seed = get_optional_input("Seed (Enter for random): ");
 
     let burn_in = 30;
     let ramp = 50;
-    let max_days = 28;
-    let start = STATE_ICU;
 
     let mut rng: Box<dyn RngCore> = match seed {
         Some(s) => Box::new(StdRng::seed_from_u64(s)),
         None => Box::new(rand::thread_rng()),
     };
 
-    // Day 28 distributions
-    println!("\nComputing Day 28...");
-    let d28_c = compute_day28(&mut *rng, &p_ctrl, 5000, max_days, start);
-    let d28_t = compute_day28(&mut *rng, &p_trt, 5000, max_days, start);
+    // Day N distributions
+    println!("\nComputing Day {} distributions...", config.max_days);
+    let d_ctrl = compute_day_n(&mut *rng, &p_ctrl, &config, 5000);
+    let d_trt = compute_day_n(&mut *rng, &p_trt, &config, 5000);
 
     // Proportional odds benchmark
-    let prop_or = calculate_proportional_or(d28_c, d28_t);
-    let mann_whitney = calculate_mann_whitney_prob(d28_c, d28_t);
-    let po_power = proportional_odds_power(prop_or, n_patients, 0.05);
-    let n_80 = proportional_odds_sample_size(prop_or, 0.80, 0.05);
-    let n_90 = proportional_odds_sample_size(prop_or, 0.90, 0.05);
+    let prop_or = calculate_proportional_or(&d_ctrl, &d_trt);
+    let mann_whitney = calculate_mann_whitney_prob(&d_ctrl, &d_trt);
+    let po_power = proportional_odds_power(prop_or, n_patients, config.n_states(), 0.05);
+    let n_80 = proportional_odds_sample_size(prop_or, config.n_states(), 0.80, 0.05);
+    let n_90 = proportional_odds_sample_size(prop_or, config.n_states(), 0.90, 0.05);
 
     // Run simulations
     println!("\n--- Null ---");
     let mut null_trials = Vec::new();
     let mut null_trajectories = Vec::new();
     for sim in 0..n_sims {
-        let (trial, wealth) = run_single_trial(&mut *rng, n_patients, &p_ctrl, &p_ctrl, max_days, start, burn_in, ramp, threshold);
+        let (trial, wealth) = run_single_trial(&mut *rng, n_patients, &p_ctrl, &p_ctrl, &config, burn_in, ramp, threshold);
         if null_trajectories.len() < 30 { null_trajectories.push(wealth); }
         null_trials.push(trial);
         if (sim + 1) % 100 == 0 { print!("\rSimulation {}/{}", sim + 1, n_sims); io::stdout().flush().unwrap(); }
@@ -333,7 +502,7 @@ pub fn run() {
     let mut alt_trials = Vec::new();
     let mut alt_trajectories = Vec::new();
     for sim in 0..n_sims {
-        let (trial, wealth) = run_single_trial(&mut *rng, n_patients, &p_ctrl, &p_trt, max_days, start, burn_in, ramp, threshold);
+        let (trial, wealth) = run_single_trial(&mut *rng, n_patients, &p_ctrl, &p_trt, &config, burn_in, ramp, threshold);
         if alt_trajectories.len() < 30 { alt_trajectories.push(wealth); }
         alt_trials.push(trial);
         if (sim + 1) % 100 == 0 { print!("\rSimulation {}/{}", sim + 1, n_sims); io::stdout().flush().unwrap(); }
@@ -358,32 +527,53 @@ pub fn run() {
     // Console output
     let mut console = String::new();
     console.push_str(&format!("{}\n\n", chrono_lite()));
-    console.push_str(&format!("Model: Ward, ICU, Home (abs), Dead (abs)\n"));
-    console.push_str(&format!("Start: ICU | Follow-up: 28 days\n\n"));
-    console.push_str(&format!("Ctrl: Ward={:.1}% ICU={:.1}% Home={:.1}% Dead={:.1}%\n", d28_c[0]*100.0, d28_c[1]*100.0, d28_c[2]*100.0, d28_c[3]*100.0));
-    console.push_str(&format!("Trt:  Ward={:.1}% ICU={:.1}% Home={:.1}% Dead={:.1}%\n\n", d28_t[0]*100.0, d28_t[1]*100.0, d28_t[2]*100.0, d28_t[3]*100.0));
-    console.push_str(&format!("--- Proportional Odds Benchmark ---\n"));
+
+    // State info
+    console.push_str("States (worst→best): ");
+    console.push_str(&config.state_names.join(" < "));
+    console.push_str("\n");
+    console.push_str(&format!("Absorbing: {:?} | Start: {} | Days: {}\n\n",
+        config.absorbing.iter().map(|&i| &config.state_names[i]).collect::<Vec<_>>(),
+        config.state_names[config.start_state],
+        config.max_days));
+
+    // Day N distributions
+    console.push_str(&format!("--- Day {} Distribution ---\n", config.max_days));
+    console.push_str("Control:   ");
+    for (i, p) in d_ctrl.iter().enumerate() {
+        console.push_str(&format!("{}={:.1}% ", config.state_names[i], p * 100.0));
+    }
+    console.push_str("\nTreatment: ");
+    for (i, p) in d_trt.iter().enumerate() {
+        console.push_str(&format!("{}={:.1}% ", config.state_names[i], p * 100.0));
+    }
+    console.push_str("\n\n");
+
+    console.push_str("--- Proportional Odds Benchmark ---\n");
     console.push_str(&format!("Proportional OR:     {:.2}\n", prop_or));
     console.push_str(&format!("Mann-Whitney P(T>C): {:.1}%\n", mann_whitney * 100.0));
     console.push_str(&format!("PO Power at N={}:  {:.1}%\n", n_patients, po_power * 100.0));
     console.push_str(&format!("PO N for 80%/90%:    {}/{}\n\n", n_80, n_90));
+
     console.push_str(&format!("--- Power at N={} ---\n", n_patients));
     console.push_str(&format!("Prop Odds:  {:.1}%\n", po_power * 100.0));
     console.push_str(&format!("e-RTms:     {:.1}%  (Type I: {:.2}%)\n", power_ert, type1_ert));
     console.push_str(&format!("e-RTu:      {:.1}%  (Type I: {:.2}%)\n\n", power_agn, type1_agn));
-    console.push_str(&format!("--- Type M Error ---\n"));
+
+    console.push_str("--- Type M Error ---\n");
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));
     console.push_str(&format!("Effect at final: {:.3}\n", avg_effect_final));
     console.push_str(&format!("Type M ratio:    {:.2}x\n\n", type_m));
-    console.push_str(&format!("--- Futility Grid ---\n"));
-    console.push_str(&format!("Threshold  Triggered  Recovered\n"));
+
+    console.push_str("--- Futility Grid ---\n");
+    console.push_str("Threshold  Triggered  Recovered\n");
     for (thresh, triggered, recovered) in &futility_grid {
         console.push_str(&format!("  {:.1}       {:5.1}%     {:5.1}%\n", thresh, triggered, recovered));
     }
 
     print!("{}", console);
 
-    // HTML
+    // HTML Report
     let html = format!(r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>e-RTms Multi-State Report</title>
 <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>

@@ -15,12 +15,13 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTo | 2 | Bounded continuous (VFD 0-28, scores) | Mean Difference |
 | e-RTc | 2 | Unbounded continuous (biomarkers) | Cohen's d |
 | e-RTs | 3 | Time-to-event (survival) | Hazard-based |
-| e-RTms | 4 | Multi-state (ICU->Ward->Home) | Transition OR |
+| e-RTms | 4 | Multi-state (ordinal transitions) | Proportional OR |
 | e-RTu | 5 | Universal/agnostic | Rate Difference |
 | Analyze Binary | 6 | Real trial CSV (binary) | RD, OR |
 | Analyze Continuous | 7 | Real trial CSV (continuous) | Mean Diff, d |
 | Analyze Survival | 8 | Real trial CSV (survival) | HR |
-| Compare Methods | 9 | e-RTo vs e-RTc comparison | Both |
+| Analyze Multi-State | 9 | Real trial CSV (multi-state) | Proportional OR |
+| Compare Methods | 10 | e-RTo vs e-RTc comparison | Both |
 
 ---
 
@@ -279,24 +280,28 @@ Cumulative signal drives betting:
 
 **Menu option:** 4
 
-**Use case:** Trials tracking patients through multiple states (e.g., ICU -> Ward -> Home/Dead).
+**Use case:** Trials tracking patients through multiple ordered states (e.g., Dead < ICU < Ward < Home).
 
-**States:** Ward (0), ICU (1), Home (2, absorbing), Dead (3, absorbing)
+**Configuration:**
+- **ICU preset:** Dead(0) < ICU(1) < Ward(2) < Home(3), absorbing: Dead, Home
+- **Custom:** User-defined N states, ordered worst to best
+
+**State ordering:** States indexed 0 to N-1, where 0 = worst outcome, N-1 = best outcome.
 
 **Formula:**
 
 ```
 Each day, patient transitions according to transition matrix P[from][to].
 
-Favorable transitions (treatment working):
-    ICU -> Ward (step-down)
-    Ward -> Home (discharge)
-    ICU -> Home (discharge from ICU)
+Good transition (treatment working):
+    Moving to higher-indexed state (to > from)
+    Examples: ICU -> Ward, Ward -> Home
 
-Unfavorable transitions:
-    Ward -> ICU (deterioration)
-    Ward -> Dead
-    ICU -> Dead
+Bad transition (treatment failing):
+    Moving to lower-indexed state (to < from)
+    Examples: Ward -> ICU, ICU -> Dead
+
+Neutral: Staying in same state (no signal)
 
 Signal for patient on day d:
     If favorable transition:   signal = +1
@@ -307,16 +312,21 @@ Betting uses cumulative transition evidence:
     lambda_n based on observed transition rate difference between arms
 ```
 
-**Effect sizes:**
+**Effect sizes (ICU preset):**
 - **Large:** OR ~1.6, +15% Home at day 28
 - **Small:** OR ~1.2, +5% Home at day 28 (more realistic)
 
 **Parameters:**
-- `Effect size`: Large (1) or Small (2)
-- `Days to simulate`: Follow-up duration (e.g., 28)
+- `Configuration`: ICU preset (1) or Custom states (2)
+- For custom: State names, absorbing states, starting state, follow-up days
+- `Transition matrices`: Control and treatment (rows must sum to 1.0)
 - `Patients per trial`: Sample size
 - `Simulations`: Monte Carlo runs
 - `Threshold`: e-value threshold
+
+**Benchmark metrics:**
+- Proportional Odds Ratio (OR > 1 favors treatment)
+- Mann-Whitney P(T>C) (probability treatment outcome better than control)
 
 ---
 
@@ -454,9 +464,59 @@ treatment,time,status
 
 ---
 
-### 10. Compare e-RTo vs e-RTc
+### 10. Analyze Multi-State Trial (CSV)
 
 **Menu option:** 9
+
+**CLI:** `ert analyze-multistate <file.csv> [options]`
+
+**Use case:** Analyze real clinical trial data with multi-state/ordinal outcomes.
+
+**CSV format:**
+```
+patient_id,time,state,treatment
+1,0,1,1
+1,1,2,1
+1,2,3,1
+2,0,1,0
+2,1,0,0
+...
+```
+- `patient_id`: Patient identifier
+- `time`: Day/timepoint
+- `state`: State index (0 = worst, N-1 = best)
+- `treatment`: 0 (control) or 1 (treatment)
+
+**CLI options:**
+- `--states` or `-s`: State names, comma-separated (e.g., "Dead,ICU,Ward,Home")
+- `--threshold` or `-t`: e-value threshold (default 20)
+- `--burn-in` or `-b`: Initial transitions before betting (default 30)
+- `--ramp` or `-r`: Ramp period (default 50)
+- `--no-report`: Skip HTML report
+
+**Example:**
+```bash
+ert analyze-multistate icu_trial.csv --states "Dead,ICU,Ward,Home"
+```
+
+**Analysis:**
+1. Extracts transitions from patient trajectories
+2. Classifies each transition as good (to > from) or bad (to < from)
+3. Applies e-RTms betting based on transition direction
+4. Reports final state distribution and proportional odds
+
+**Output:**
+- Transition counts (good/bad/neutral)
+- e-value trajectory
+- Final state distribution by arm
+- Proportional Odds Ratio
+- Mann-Whitney P(T>C)
+
+---
+
+### 11. Compare e-RTo vs e-RTc
+
+**Menu option:** 10
 
 Runs both methods on identical simulated data to compare Type I error and power.
 
@@ -544,6 +604,7 @@ Reports use:
 | `binary_analysis_report.html` | Analyze Binary (CSV) |
 | `continuous_analysis_report.html` | Analyze Continuous (CSV) |
 | `survival_analysis_report.html` | Analyze Survival (CSV) |
+| `multistate_analysis_report.html` | Analyze Multi-State (CSV) |
 | `comparison_report.html` | Compare Methods |
 
 ---
