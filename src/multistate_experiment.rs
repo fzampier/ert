@@ -189,7 +189,7 @@ fn run_stratified_trial<R: Rng + ?Sized>(
         strata_n_obs[from] += 1;
 
         // Compute stratum-specific lambda (use global i for burn-in)
-        let s_lambda = if i >= burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
+        let s_lambda = if i > burn_in && s.n_total_trt > 0.0 && s.n_total_ctrl > 0.0 {
             let c_i = (((i - burn_in) as f64) / ramp as f64).clamp(0.0, 1.0);
             let rate_trt = s.n_good_trt / s.n_total_trt;
             let rate_ctrl = s.n_good_ctrl / s.n_total_ctrl;
@@ -197,7 +197,7 @@ fn run_stratified_trial<R: Rng + ?Sized>(
             if is_good { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta }
         } else { 0.5 };
 
-        let s_lambda = s_lambda.clamp(0.01, 0.99);
+        let s_lambda = s_lambda.clamp(0.001, 0.999);
         let s_mult = if is_trt { s_lambda / 0.5 } else { (1.0 - s_lambda) / 0.5 };
         s.wealth *= s_mult;
 
@@ -214,7 +214,7 @@ fn run_stratified_trial<R: Rng + ?Sized>(
             if is_good { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta }
         } else { 0.5 };
 
-        let orig_lambda = orig_lambda.clamp(0.01, 0.99);
+        let orig_lambda = orig_lambda.clamp(0.001, 0.999);
         let orig_mult = if is_trt { orig_lambda / 0.5 } else { (1.0 - orig_lambda) / 0.5 };
         orig_wealth *= orig_mult;
 

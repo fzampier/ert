@@ -111,7 +111,7 @@ impl AgnosticERT {
             } else {
                 0.5 - 0.5 * c_i * delta
             };
-            base.clamp(0.01, 0.99)
+            base.clamp(0.001, 0.999)
         } else {
             0.5 // No information yet, neutral bet
         };
