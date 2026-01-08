@@ -306,6 +306,161 @@ impl BinaryERTProcess {
 }
 
 // ============================================================================
+// CONTINUOUS e-RTo PROCESS (bounded/ordinal)
+// ============================================================================
+
+/// e-RTo process for bounded continuous outcomes (e.g., VFD 0-28)
+pub struct LinearERTProcess {
+    pub wealth: f64,
+    pub burn_in: usize,
+    pub ramp: usize,
+    pub min_val: f64,
+    pub max_val: f64,
+    sum_trt: f64,
+    n_trt: f64,
+    sum_ctrl: f64,
+    n_ctrl: f64,
+}
+
+impl LinearERTProcess {
+    pub fn new(burn_in: usize, ramp: usize, min_val: f64, max_val: f64) -> Self {
+        Self {
+            wealth: 1.0, burn_in, ramp, min_val, max_val,
+            sum_trt: 0.0, n_trt: 0.0, sum_ctrl: 0.0, n_ctrl: 0.0,
+        }
+    }
+
+    pub fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
+        let mean_trt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { (self.min_val + self.max_val) / 2.0 };
+        let mean_ctrl = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { (self.min_val + self.max_val) / 2.0 };
+        let delta_hat = mean_trt - mean_ctrl;
+
+        if is_trt { self.n_trt += 1.0; self.sum_trt += outcome; }
+        else { self.n_ctrl += 1.0; self.sum_ctrl += outcome; }
+
+        if i > self.burn_in {
+            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
+            let x = (outcome - self.min_val) / (self.max_val - self.min_val);
+            let scalar = 2.0 * x - 1.0;
+            let range = self.max_val - self.min_val;
+            let delta_norm = delta_hat / range;
+            let lambda = (0.5 + 0.5 * c_i * delta_norm * scalar).clamp(0.001, 0.999);
+            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
+            self.wealth *= mult;
+        }
+    }
+
+    pub fn current_effect(&self) -> f64 {
+        let mt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 };
+        let mc = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 };
+        mt - mc
+    }
+
+    pub fn get_means(&self) -> (f64, f64) {
+        (if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 },
+         if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 })
+    }
+
+    pub fn get_ns(&self) -> (usize, usize) {
+        (self.n_trt as usize, self.n_ctrl as usize)
+    }
+}
+
+// ============================================================================
+// CONTINUOUS e-RTc PROCESS (unbounded/MAD-based)
+// ============================================================================
+
+/// e-RTc process for unbounded continuous outcomes (biomarkers, lab values)
+pub struct MADProcess {
+    pub wealth: f64,
+    pub burn_in: usize,
+    pub ramp: usize,
+    pub c_max: f64,
+    outcomes: Vec<f64>,
+    treatments: Vec<bool>,
+}
+
+impl MADProcess {
+    pub fn new(burn_in: usize, ramp: usize, c_max: f64) -> Self {
+        Self { wealth: 1.0, burn_in, ramp, c_max, outcomes: Vec::new(), treatments: Vec::new() }
+    }
+
+    pub fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
+        // Continuous direction: standardized effect estimate
+        let direction = if !self.outcomes.is_empty() {
+            let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
+            let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
+            for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+                if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
+                else { sum_c += o; ss_c += o * o; n_c += 1.0; }
+            }
+            if n_t > 1.0 && n_c > 1.0 {
+                let m_t = sum_t / n_t;
+                let m_c = sum_c / n_c;
+                let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
+                let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
+                let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(0.001);
+                let delta = (m_t - m_c) / pooled_sd;
+                delta.clamp(-1.0, 1.0)
+            } else { 0.0 }
+        } else { 0.0 };
+
+        self.outcomes.push(outcome);
+        self.treatments.push(is_trt);
+
+        if i > self.burn_in && self.outcomes.len() > 1 {
+            let past: Vec<f64> = self.outcomes[..self.outcomes.len()-1].to_vec();
+            let med = median(&past);
+            let mad_val = mad(&past);
+            let s = if mad_val > 0.0 { mad_val } else { 1.0 };
+            let r = (outcome - med) / s;
+            let g = r / (1.0 + r.abs());
+            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
+            let lambda = (0.5 + c_i * self.c_max * g * direction).clamp(0.001, 0.999);
+            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
+            self.wealth *= mult;
+        }
+    }
+
+    pub fn current_effect(&self, sd: f64) -> f64 {
+        let (mut sum_t, mut n_t, mut sum_c, mut n_c) = (0.0, 0.0, 0.0, 0.0);
+        for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+            if t { sum_t += o; n_t += 1.0; } else { sum_c += o; n_c += 1.0; }
+        }
+        let m_t = if n_t > 0.0 { sum_t / n_t } else { 0.0 };
+        let m_c = if n_c > 0.0 { sum_c / n_c } else { 0.0 };
+        (m_t - m_c) / sd
+    }
+
+    pub fn get_means(&self) -> (f64, f64) {
+        let (mut sum_t, mut n_t, mut sum_c, mut n_c) = (0.0, 0.0, 0.0, 0.0);
+        for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+            if t { sum_t += o; n_t += 1.0; } else { sum_c += o; n_c += 1.0; }
+        }
+        (if n_t > 0.0 { sum_t / n_t } else { 0.0 },
+         if n_c > 0.0 { sum_c / n_c } else { 0.0 })
+    }
+
+    pub fn get_ns(&self) -> (usize, usize) {
+        let n_trt = self.treatments.iter().filter(|&&t| t).count();
+        (n_trt, self.treatments.len() - n_trt)
+    }
+
+    pub fn get_pooled_sd(&self) -> f64 {
+        let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
+        let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
+        for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
+            if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
+            else { sum_c += o; ss_c += o * o; n_c += 1.0; }
+        }
+        if n_t < 2.0 || n_c < 2.0 { return 1.0; }
+        let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
+        let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
+        ((var_t * (n_t - 1.0) + var_c * (n_c - 1.0)) / (n_t + n_c - 2.0)).sqrt()
+    }
+}
+
+// ============================================================================
 // SAMPLE SIZE CALCULATIONS
 // ============================================================================
 

@@ -9,7 +9,10 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::ert_core::{get_input, get_input_usize, get_bool, get_string, get_choice, median, mad, chrono_lite};
+use crate::ert_core::{
+    get_input, get_input_usize, get_bool, get_string, get_choice, median, mad, chrono_lite,
+    LinearERTProcess, MADProcess,
+};
 
 // === DATA STRUCTURES ===
 
@@ -61,148 +64,6 @@ struct AnalysisResult {
     futility_points: Vec<FutilityPoint>,
     futility_regions: Vec<(usize, usize)>,
     design: Option<DesignParams>,
-}
-
-// === e-RTo PROCESS (bounded/ordinal) ===
-
-struct LinearERTProcess {
-    wealth: f64,
-    burn_in: usize,
-    ramp: usize,
-    min_val: f64,
-    max_val: f64,
-    sum_trt: f64,
-    n_trt: f64,
-    sum_ctrl: f64,
-    n_ctrl: f64,
-}
-
-impl LinearERTProcess {
-    fn new(burn_in: usize, ramp: usize, min_val: f64, max_val: f64) -> Self {
-        LinearERTProcess {
-            wealth: 1.0, burn_in, ramp, min_val, max_val,
-            sum_trt: 0.0, n_trt: 0.0, sum_ctrl: 0.0, n_ctrl: 0.0,
-        }
-    }
-
-    fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
-        let mean_trt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { (self.min_val + self.max_val) / 2.0 };
-        let mean_ctrl = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { (self.min_val + self.max_val) / 2.0 };
-        let delta_hat = mean_trt - mean_ctrl;
-
-        if is_trt { self.n_trt += 1.0; self.sum_trt += outcome; }
-        else { self.n_ctrl += 1.0; self.sum_ctrl += outcome; }
-
-        if i > self.burn_in {
-            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
-            let x = (outcome - self.min_val) / (self.max_val - self.min_val);
-            let scalar = 2.0 * x - 1.0;
-            let range = self.max_val - self.min_val;
-            let delta_norm = delta_hat / range;
-            let lambda = (0.5 + 0.5 * c_i * delta_norm * scalar).clamp(0.001, 0.999);
-            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            self.wealth *= mult;
-        }
-    }
-
-    fn current_effect(&self) -> f64 {
-        let mt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 };
-        let mc = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 };
-        mt - mc
-    }
-
-    fn get_means(&self) -> (f64, f64) {
-        (if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 },
-         if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 })
-    }
-
-    fn get_ns(&self) -> (usize, usize) { (self.n_trt as usize, self.n_ctrl as usize) }
-}
-
-// === e-RTc PROCESS (unbounded/MAD) ===
-
-struct MADProcess {
-    wealth: f64,
-    burn_in: usize,
-    ramp: usize,
-    c_max: f64,
-    outcomes: Vec<f64>,
-    treatments: Vec<bool>,
-}
-
-impl MADProcess {
-    fn new(burn_in: usize, ramp: usize, c_max: f64) -> Self {
-        MADProcess { wealth: 1.0, burn_in, ramp, c_max, outcomes: Vec::new(), treatments: Vec::new() }
-    }
-
-    fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
-        // Continuous direction: standardized effect estimate (not just sign)
-        let direction = if !self.outcomes.is_empty() {
-            let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
-            let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
-            for (&o, &t) in self.outcomes.iter().zip(self.treatments.iter()) {
-                if t { sum_t += o; ss_t += o * o; n_t += 1.0; }
-                else { sum_c += o; ss_c += o * o; n_c += 1.0; }
-            }
-            if n_t > 1.0 && n_c > 1.0 {
-                let m_t = sum_t / n_t;
-                let m_c = sum_c / n_c;
-                let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
-                let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
-                let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(0.001);
-                let delta = (m_t - m_c) / pooled_sd;
-                delta.clamp(-1.0, 1.0)
-            } else { 0.0 }
-        } else { 0.0 };
-
-        self.outcomes.push(outcome);
-        self.treatments.push(is_trt);
-
-        if i > self.burn_in && self.outcomes.len() > 1 {
-            let past: Vec<f64> = self.outcomes[..self.outcomes.len()-1].to_vec();
-            let med = median(&past);
-            let mad_val = mad(&past);
-            let s = if mad_val > 0.0 { mad_val } else { 1.0 };
-            let r = (outcome - med) / s;
-            let g = r / (1.0 + r.abs());
-            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
-            let lambda = (0.5 + c_i * self.c_max * g * direction).clamp(0.001, 0.999);
-            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            self.wealth *= mult;
-        }
-    }
-
-    fn current_effect(&self, sd: f64) -> f64 {
-        let trt: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| t).map(|(&o, _)| o).collect();
-        let ctrl: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-        let mt = if !trt.is_empty() { trt.iter().sum::<f64>() / trt.len() as f64 } else { 0.0 };
-        let mc = if !ctrl.is_empty() { ctrl.iter().sum::<f64>() / ctrl.len() as f64 } else { 0.0 };
-        (mt - mc) / sd
-    }
-
-    fn get_means(&self) -> (f64, f64) {
-        let trt: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| t).map(|(&o, _)| o).collect();
-        let ctrl: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-        (if !trt.is_empty() { trt.iter().sum::<f64>() / trt.len() as f64 } else { 0.0 },
-         if !ctrl.is_empty() { ctrl.iter().sum::<f64>() / ctrl.len() as f64 } else { 0.0 })
-    }
-
-    fn get_ns(&self) -> (usize, usize) {
-        let n_trt = self.treatments.iter().filter(|&&t| t).count();
-        (n_trt, self.treatments.len() - n_trt)
-    }
-
-    fn get_pooled_sd(&self) -> f64 {
-        let trt: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| t).map(|(&o, _)| o).collect();
-        let ctrl: Vec<f64> = self.outcomes.iter().zip(&self.treatments).filter(|(_, &t)| !t).map(|(&o, _)| o).collect();
-        let (n1, n2) = (trt.len() as f64, ctrl.len() as f64);
-        if n1 < 2.0 || n2 < 2.0 { return 1.0; }
-        let m1 = trt.iter().sum::<f64>() / n1;
-        let m2 = ctrl.iter().sum::<f64>() / n2;
-        let ss1: f64 = trt.iter().map(|x| (x - m1).powi(2)).sum();
-        let ss2: f64 = ctrl.iter().map(|x| (x - m2).powi(2)).sum();
-        ((ss1 + ss2) / (n1 + n2 - 2.0)).sqrt()
-    }
 }
 
 // === CLI ===
