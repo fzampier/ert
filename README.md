@@ -50,6 +50,7 @@ See [MANUAL.md](MANUAL.md) for mathematical details and usage.
 ## Disclaimer
 
 Experimental method under development. Not for clinical use without statistical oversight.
+In case this isn't obvious, this is a side project for me that is heavily vibe coded with Claude Code while I try to learn Rust myself.
 
 ## License
 
