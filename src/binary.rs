@@ -274,7 +274,7 @@ pub fn run() {
     out.push_str(&format!("e-RTu:     {:.1}%\n", agn_power));
 
     if n_success > 0 {
-        out.push_str(&format!("\n--- Stopping ---\n"));
+        out.push_str("\n--- Stopping ---\n");
         out.push_str(&format!("Avg stop:      {:.0} ({:.0}%)\n", avg_stop, avg_stop / n_patients as f64 * 100.0));
         out.push_str(&format!("ARR @ stop:    {:.1}%\n", avg_arr_stop * 100.0));
         out.push_str(&format!("ARR @ end:     {:.1}%\n", avg_arr_end * 100.0));

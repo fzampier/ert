@@ -731,7 +731,7 @@ pub fn run() {
     // State info
     console.push_str("States (worst→best): ");
     console.push_str(&config.state_names.join(" < "));
-    console.push_str("\n");
+    console.push('\n');
     console.push_str(&format!("Absorbing: {:?} | Start: {} | Days: {}\n\n",
         config.absorbing.iter().map(|&i| &config.state_names[i]).collect::<Vec<_>>(),
         config.state_names[config.start_state],

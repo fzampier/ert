@@ -741,10 +741,10 @@ fn build_comparison_html(r: &ComparisonResult) -> String {
         r.linear.type1_error, r.mad.type1_error,
         if r.linear.type1_error < r.mad.type1_error { "e-RTo" } else { "e-RTc" },
         // Power
-        if power_winner == "e-RTo" { "winner" } else if power_winner == "e-RTc" { "" } else { "" },
+        if power_winner == "e-RTo" { "winner" } else { "" },
         r.linear.power, r.mad.power, power_winner,
         // Speed
-        if speed_winner == "e-RTo" { "winner" } else if speed_winner == "e-RTc" { "" } else { "" },
+        if speed_winner == "e-RTo" { "winner" } else { "" },
         r.linear.avg_stop_n, (r.linear.avg_stop_n / r.n_patients as f64) * 100.0,
         r.mad.avg_stop_n, (r.mad.avg_stop_n / r.n_patients as f64) * 100.0,
         speed_winner,

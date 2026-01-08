@@ -274,12 +274,12 @@ fn vfd_mixture_moments(p_death: f64, survivor_mean: f64, max_val: f64) -> (f64, 
     let alpha = beta_mean.clamp(0.05, 0.95) * concentration;
     let beta_param = (1.0 - beta_mean.clamp(0.05, 0.95)) * concentration;
     let beta_var = (alpha * beta_param) / ((alpha + beta_param).powi(2) * (alpha + beta_param + 1.0));
-    let survivor_var = beta_var * (max_val - 1.0).powi(2) as f64;
+    let survivor_var = beta_var * (max_val - 1.0).powi(2);
 
     // Total variance using law of total variance
-    let e_x2_survivor = survivor_mean.powi(2) as f64 + survivor_var;
+    let e_x2_survivor = survivor_mean.powi(2) + survivor_var;
     let e_x2 = (1.0 - p_death) * e_x2_survivor;
-    let var = e_x2 - mean.powi(2) as f64 + p_death * (1.0 - p_death) * survivor_mean.powi(2) as f64;
+    let var = e_x2 - mean.powi(2) + p_death * (1.0 - p_death) * survivor_mean.powi(2);
 
     (mean, var.sqrt())
 }

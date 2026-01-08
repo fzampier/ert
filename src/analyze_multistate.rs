@@ -66,6 +66,10 @@ struct AnalysisResult {
     ctrl_final_dist: Vec<f64>,
     trt_final_dist: Vec<f64>,
 
+    // Mean days in each state
+    ctrl_mean_days: Vec<f64>,
+    trt_mean_days: Vec<f64>,
+
     // Effect estimates
     prop_or: f64,
     mann_whitney: f64,
@@ -265,6 +269,68 @@ fn calculate_mann_whitney(ctrl_dist: &[f64], trt_dist: &[f64]) -> f64 {
     prob
 }
 
+fn calculate_mean_days_in_state(records: &[PatientRecord], n_states: usize) -> (Vec<f64>, Vec<f64>) {
+    // Find max follow-up time
+    let max_time = records.iter().map(|r| r.time).max().unwrap_or(0);
+
+    // Group by patient
+    let mut by_patient: HashMap<String, Vec<&PatientRecord>> = HashMap::new();
+    for r in records {
+        by_patient.entry(r.patient_id.clone()).or_default().push(r);
+    }
+
+    let mut ctrl_days = vec![0.0; n_states];
+    let mut trt_days = vec![0.0; n_states];
+    let mut n_ctrl = 0;
+    let mut n_trt = 0;
+
+    for (_, mut patient_records) in by_patient {
+        if patient_records.is_empty() {
+            continue;
+        }
+
+        // Sort by time
+        patient_records.sort_by_key(|r| r.time);
+
+        let treatment = patient_records[0].treatment;
+        let mut patient_days = vec![0.0; n_states];
+
+        // Calculate time spent in each state
+        for i in 0..patient_records.len() {
+            let curr = patient_records[i];
+            let next_time = if i + 1 < patient_records.len() {
+                patient_records[i + 1].time
+            } else {
+                max_time  // Last observation: extend to end of follow-up
+            };
+
+            let duration = (next_time - curr.time) as f64;
+            if curr.state < n_states {
+                patient_days[curr.state] += duration;
+            }
+        }
+
+        // Add to appropriate group
+        if treatment == 1 {
+            for s in 0..n_states {
+                trt_days[s] += patient_days[s];
+            }
+            n_trt += 1;
+        } else {
+            for s in 0..n_states {
+                ctrl_days[s] += patient_days[s];
+            }
+            n_ctrl += 1;
+        }
+    }
+
+    // Calculate means
+    let ctrl_mean: Vec<f64> = ctrl_days.iter().map(|&d| d / n_ctrl.max(1) as f64).collect();
+    let trt_mean: Vec<f64> = trt_days.iter().map(|&d| d / n_trt.max(1) as f64).collect();
+
+    (ctrl_mean, trt_mean)
+}
+
 // === HTML REPORT ===
 
 fn generate_html_report(result: &AnalysisResult, path: &str) -> std::io::Result<()> {
@@ -296,6 +362,20 @@ fn generate_html_report(result: &AnalysisResult, path: &str) -> std::io::Result<
              <div style='background:#27ae60;height:20px;width:{}%'></div>\
              <span style='margin-left:5px'>{:.1}%</span></div>",
             name, trt_pct * 2.0, trt_pct
+        ));
+    }
+
+    // Mean days table rows
+    let mut days_rows = String::new();
+    for i in 0..result.n_states {
+        let name = &result.state_names[i];
+        let ctrl_d = result.ctrl_mean_days[i];
+        let trt_d = result.trt_mean_days[i];
+        let diff = trt_d - ctrl_d;
+        let diff_class = if diff.abs() < 0.1 { "" } else if diff > 0.0 { "style='color:#27ae60'" } else { "style='color:#e74c3c'" };
+        days_rows.push_str(&format!(
+            "<tr><td>{}</td><td>{:.1}</td><td>{:.1}</td><td {}>{:+.1}</td></tr>",
+            name, ctrl_d, trt_d, diff_class, diff
         ));
     }
 
@@ -376,6 +456,14 @@ fn generate_html_report(result: &AnalysisResult, path: &str) -> std::io::Result<
     </div>
 
     <div class="card">
+        <h2>Mean Days in Each State</h2>
+        <table>
+            <tr><th>State</th><th>Control</th><th>Treatment</th><th>Difference</th></tr>
+            {days_rows}
+        </table>
+    </div>
+
+    <div class="card">
         <h2>Effect Estimates</h2>
         <table>
             <tr><th>Metric</th><th>Value</th><th>Interpretation</th></tr>
@@ -440,6 +528,7 @@ fn generate_html_report(result: &AnalysisResult, path: &str) -> std::io::Result<
         crossing_text = crossing_text,
         ctrl_bars = ctrl_bars,
         trt_bars = trt_bars,
+        days_rows = days_rows,
         prop_or = result.prop_or,
         or_interp = if result.prop_or > 1.0 { "Treatment favored" } else if result.prop_or < 1.0 { "Control favored" } else { "No difference" },
         mw = result.mann_whitney * 100.0,
@@ -521,6 +610,9 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     // Final state distributions
     let (ctrl_dist, trt_dist) = calculate_final_distributions(&records, n_states);
 
+    // Mean days in each state
+    let (ctrl_mean_days, trt_mean_days) = calculate_mean_days_in_state(&records, n_states);
+
     // Effect estimates
     let prop_or = calculate_proportional_or(&ctrl_dist, &trt_dist);
     let mann_whitney = calculate_mann_whitney(&ctrl_dist, &trt_dist);
@@ -547,6 +639,18 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     }
     println!();
 
+    println!("\n--- Mean Days in Each State ---");
+    print!("Control:   ");
+    for (i, &d) in ctrl_mean_days.iter().enumerate() {
+        print!("{}={:.1} ", state_names[i], d);
+    }
+    println!();
+    print!("Treatment: ");
+    for (i, &d) in trt_mean_days.iter().enumerate() {
+        print!("{}={:.1} ", state_names[i], d);
+    }
+    println!();
+
     println!("\n--- Effect Estimates ---");
     println!("Proportional OR:     {:.2}", prop_or);
     println!("Mann-Whitney P(T>C): {:.1}%", mann_whitney * 100.0);
@@ -568,6 +672,8 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
             final_e,
             ctrl_final_dist: ctrl_dist,
             trt_final_dist: trt_dist,
+            ctrl_mean_days,
+            trt_mean_days,
             prop_or,
             mann_whitney,
         };
