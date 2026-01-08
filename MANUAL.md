@@ -579,7 +579,18 @@ c(n) = 0                          if n <= burn_in
 
 Purpose: Prevents catastrophic early losses from noise before effect direction is learned.
 
-Typical values: burn_in = 50, ramp = 100
+**Default values by module:**
+
+| Module | Burn-in | Ramp | Rationale |
+|--------|---------|------|-----------|
+| e-RT (binary) | 50 | 100 | Binary data is noisy; more patients needed to learn direction |
+| e-RTo/c (continuous) | 20 | 50 | Continuous outcomes carry more information per patient |
+| e-RTs (survival) | 30 | 50 | Events are sparse; balance between learning and not waiting too long |
+| e-RTms (multi-state) | 30 | 50 | Multiple transitions per patient; similar to survival |
+
+The key tradeoff:
+- **Higher burn-in:** More robust direction learning, but delays early stopping
+- **Lower burn-in:** Faster potential stopping, but risk of betting wrong direction early
 
 ### Type M Error
 

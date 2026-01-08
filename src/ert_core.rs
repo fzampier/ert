@@ -124,19 +124,48 @@ pub fn mad(data: &[f64]) -> f64 {
     median(&deviations)
 }
 
-/// Simple timestamp without external crate
+/// Simple timestamp without external crate (proper leap year handling)
 pub fn chrono_lite() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
+    let mut days = (secs / 86400) as i64;
+
+    // Find year with leap year handling
+    let mut year = 1970i64;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    // Find month
+    let days_in_months: [i64; 12] = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for &dm in &days_in_months {
+        if days < dm {
+            break;
+        }
+        days -= dm;
+        month += 1;
+    }
+
+    let day = days + 1;  // 1-indexed
     let hours = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;
-    format!("{}-{:02}-{:02} {:02}:{:02} UTC", years, months, day, hours, mins)
+    format!("{}-{:02}-{:02} {:02}:{:02} UTC", year, month, day, hours, mins)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 // ============================================================================
