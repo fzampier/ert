@@ -16,6 +16,9 @@ When wealth exceeds a threshold (e.g., 20 for alpha=0.05), we reject the null. V
 
 **[Read the preprint](https://arxiv.org/abs/2512.04366)**
 
+The preprint has R code from a previous implementation. As of January 07 2026, the Rust implementation has some advantages not implemented in the R code.
+R code remains valid.
+
 ## Methods
 
 | Method | Endpoint | Use Case |
