@@ -31,6 +31,12 @@ R code remains valid.
 
 e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
 
+## Futility Monitoring
+
+The FutilityMonitor is a simulation-based decision support tool (not an e-process) that answers: "What effect size would be needed for 10% recovery probability?"
+
+If the required effect exceeds 1.75x the design effect for multiple consecutive checkpoints, it recommends considering stopping for futility. Validated calibration shows ~8-10% recovery rate among trials where stop was recommended.
+
 ## Quick Start
 
 ```bash

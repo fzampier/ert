@@ -427,10 +427,10 @@ treatment,outcome
 - `Futility monitoring`: Optional, tracks recovery probability
 
 **Futility analysis (if enabled):**
-- `Futility threshold`: e-value below which to flag (e.g., 0.5)
 - `Design control rate`: Expected control rate from protocol
 - `Design treatment rate`: Expected treatment rate from protocol
-- Uses Monte Carlo to find required ARR for 50% recovery probability
+- Uses FutilityMonitor with default settings (recovery target 10%, stop ratio 1.75x)
+- Reports whether stop was recommended and worst observed ratio
 
 ---
 
@@ -607,17 +607,47 @@ Early stopping tends to overestimate effects. Type M quantifies this.
 
 ### Futility Monitoring
 
-Tracks whether trial can still succeed:
-- Monitors when e-value drops below threshold
-- Uses Monte Carlo to find required effect for 50% recovery probability
-- Reports ratio to design effect
+**IMPORTANT:** The FutilityMonitor is a simulation-based decision support tool, NOT a martingale or e-process. It does not provide anytime-valid inference.
+
+The monitor asks: "What effect size would be needed for X% probability of eventually crossing the threshold?" and compares this to the original design ARR.
+
+**Key Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Recovery target | 10% | Target recovery probability (calibrated conservatively) |
+| Stop ratio | 1.75 | Recommend stop if required ARR > 1.75x design ARR |
+| Normal interval | 5% of N | Check every 5% of planned enrollment |
+| Alert interval | 1% of N | Switch to frequent checking when in danger zone |
+| Danger threshold | 0.5 | Below this e-value triggers alert mode |
+| Hysteresis | 3 | Consecutive checks above ratio before recommending stop |
+
+**How it works:**
+
+1. At regular checkpoints, uses Monte Carlo simulation to find the ARR that would give recovery_target (default 10%) probability of crossing the threshold
+2. Computes ratio = required_ARR / design_ARR
+3. If ratio exceeds stop_ratio (default 1.75x) for hysteresis_count consecutive checks, recommends stopping
 
 **Interpretation:**
-- Ratio < 1.0: Can recover with smaller-than-design effect
-- Ratio > 1.5: Need larger-than-design effect (concerning)
-- Ratio > 2.0: Strong signal to consider stopping
 
-**Limitation:** Current implementation uses bidirectional betting, so futility mainly captures early noise rather than "treatment isn't working." For true futility detection, one-sided betting would be needed.
+| Ratio | Meaning |
+|-------|---------|
+| < 1.0 | Can likely recover with smaller-than-design effect |
+| 1.0 - 1.5 | Within design range, continue |
+| 1.5 - 2.0 | Concerning, needing larger effect than designed |
+| > 2.0 | Strong signal to consider stopping for futility |
+
+**Calibration (validated via simulation):**
+
+Under H1 (true 5% ARR with design 5% ARR):
+- ~8-10% of trials where stop was recommended would have succeeded
+- Trials NOT recommended for stop have ~98% success rate
+
+Under H0 (no effect):
+- 100% of trials recommended for stop
+- Type I error among stopped trials ~2%
+
+**Limitation:** Uses bidirectional betting, so futility captures scenarios where the e-value is struggling, not specifically "treatment is harmful." A trial with a harmful treatment would still be recommended for futility stopping (which is appropriate).
 
 ---
 

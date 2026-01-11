@@ -1,54 +1,16 @@
-use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::RngCore;
+use rand::Rng;
 use std::io::{self, Write};
 use std::fs::File;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
     calculate_n_binary, BinaryERTProcess, z_test_power_binary,
+    FutilityMonitor, FutilityConfig,
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
-
-/// Monte Carlo binary search for required ARR to achieve 50% recovery probability
-fn required_arr_for_recovery<R: Rng + ?Sized>(
-    rng: &mut R, current_wealth: f64, n_remaining: usize,
-    p_ctrl: f64, burn_in: usize, ramp: usize,
-) -> f64 {
-    if n_remaining == 0 { return 1.0; }
-
-    let (mut lo, mut hi) = (0.001, 0.50);
-    for _ in 0..6 {
-        let mid = (lo + hi) / 2.0;
-        let p_trt = (p_ctrl - mid).max(0.001);
-
-        let mut successes = 0u32;
-        for _ in 0..50 {
-            let mut wealth = current_wealth;
-            let (mut n_t, mut e_t, mut n_c, mut e_c) = (0.0, 0.0, 0.0, 0.0);
-
-            for j in 1..=n_remaining {
-                let is_trt = rng.gen_bool(0.5);
-                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
-
-                let delta = if n_t > 0.0 && n_c > 0.0 { e_t/n_t - e_c/n_c } else { 0.0 };
-
-                if is_trt { n_t += 1.0; if event { e_t += 1.0; } }
-                else { n_c += 1.0; if event { e_c += 1.0; } }
-
-                if j > burn_in {
-                    let c = ((j - burn_in) as f64 / ramp as f64).min(1.0);
-                    let lam = (0.5 + 0.5 * c * delta * if event { 1.0 } else { -1.0 }).clamp(0.001, 0.999);
-                    wealth *= if is_trt { lam / 0.5 } else { (1.0 - lam) / 0.5 };
-                }
-                if wealth >= 20.0 { successes += 1; break; }
-            }
-        }
-        if (successes as f64) < 25.0 { lo = mid; } else { hi = mid; }
-    }
-    (lo + hi) / 2.0
-}
 
 /// Compact trial result - only what we need
 struct Trial {
@@ -57,7 +19,8 @@ struct Trial {
     arr_final: f64,
     min_wealth: f64,
     z_significant: bool,
-    mc_ratio: Option<f64>,  // Monte Carlo recovery ratio (if futility triggered)
+    futility_ever_recommended: bool,  // Did FutilityMonitor ever recommend stop?
+    futility_worst_ratio: Option<f64>, // Worst ratio observed
 }
 
 pub fn run() {
@@ -90,16 +53,31 @@ pub fn run() {
     let n_sims = get_input_usize("Number of simulations (e.g. 2000): ");
     println!("\nSuccess threshold (1/alpha). Default = 20");
     let threshold: f64 = get_input("Success threshold: ");
-    println!("\nFutility watch threshold. Default = 0.5");
-    let fut_watch: f64 = get_input("Futility watch: ");
-    let run_mc = get_bool("Run Monte Carlo futility analysis?");
+
+    // Futility monitoring configuration
+    let run_futility = get_bool("Enable futility monitoring?");
+    let futility_config = if run_futility {
+        println!("\n--- Futility Config (simulation-based, NOT martingale) ---");
+        println!("Recovery target: probability of recovery to recommend stop");
+        let recovery_target: f64 = get_input("Recovery target (default 0.10): ");
+        println!("Stop ratio: recommend stop if required ARR > ratio * design ARR");
+        let stop_ratio: f64 = get_input("Stop ratio (default 1.75): ");
+        Some(FutilityConfig {
+            recovery_target: if recovery_target > 0.0 { recovery_target } else { 0.10 },
+            stop_ratio: if stop_ratio > 0.0 { stop_ratio } else { 1.75 },
+            ..FutilityConfig::default()
+        })
+    } else {
+        None
+    };
+
     let seed = get_optional_input("Seed (Enter for random): ");
 
     let (burn_in, ramp) = (50usize, 100usize);
 
     println!("\n--- Configuration ---");
     println!("p_ctrl={:.1}% p_trt={:.1}% ARR={:.1}% N={} sims={} thresh={} fut={}",
-        p_ctrl*100.0, p_trt*100.0, design_arr*100.0, n_patients, n_sims, threshold, fut_watch);
+        p_ctrl*100.0, p_trt*100.0, design_arr*100.0, n_patients, n_sims, threshold, run_futility);
 
     let mut rng: Box<dyn RngCore> = match seed {
         Some(s) => Box::new(StdRng::seed_from_u64(s)),
@@ -123,7 +101,7 @@ pub fn run() {
 
     // === PHASE 2: POWER + FUTILITY ===
     print!("Phase 2: Power");
-    if run_mc { print!(" + MC Futility"); }
+    if run_futility { print!(" + Futility"); }
     print!("... ");
     io::stdout().flush().unwrap();
 
@@ -143,9 +121,14 @@ pub fn run() {
         let mut proc = BinaryERTProcess::new(burn_in, ramp);
         let mut agn = AgnosticERT::new(burn_in, ramp, threshold);
         let (mut stopped, mut stop_n, mut arr_stop) = (false, None, 0.0);
-        let (mut agn_stopped, mut mc_ratio) = (false, None);
+        let mut agn_stopped = false;
         let mut min_w = 1.0f64;
         let mut traj = if sim < 30 { Vec::with_capacity(n_patients / step + 1) } else { Vec::new() };
+
+        // Create futility monitor for this trial if enabled
+        let mut fut_monitor = futility_config.as_ref().map(|cfg| {
+            FutilityMonitor::new(cfg.clone(), design_arr, p_ctrl, n_patients, threshold, burn_in, ramp)
+        });
 
         if sim < 30 { traj.push(1.0); }
         all_wealth_at_step[0].push(1.0);
@@ -167,10 +150,11 @@ pub fn run() {
                 if agn.observe(sig) { agn_stopped = true; agn_stops.push(i); }
             }
 
-            // MC futility (first trigger only)
-            if run_mc && mc_ratio.is_none() && proc.wealth < fut_watch && i > burn_in {
-                let req = required_arr_for_recovery(&mut *rng, proc.wealth, n_patients - i, p_ctrl, burn_in, ramp);
-                mc_ratio = Some(req / design_arr);
+            // Futility monitoring
+            if let Some(ref mut monitor) = fut_monitor {
+                if monitor.should_check(i) {
+                    monitor.check(i, proc.wealth);
+                }
             }
 
             // Success
@@ -195,13 +179,21 @@ pub fn run() {
             } else { false }
         };
 
+        // Extract futility results
+        let (fut_recommended, fut_ratio) = if let Some(monitor) = fut_monitor {
+            (monitor.ever_recommended_stop(), monitor.worst_ratio())
+        } else {
+            (false, None)
+        };
+
         trials.push(Trial {
             stop_n,
             arr_at_stop: arr_stop,
             arr_final: proc.current_risk_diff().abs(),
             min_wealth: min_w,
             z_significant: z_sig,
-            mc_ratio,
+            futility_ever_recommended: fut_recommended,
+            futility_worst_ratio: fut_ratio,
         });
     }
     println!(" done");
@@ -239,13 +231,21 @@ pub fn run() {
         }
     }
 
-    // MC futility stats
-    let mc_trials: Vec<f64> = trials.iter().filter_map(|t| t.mc_ratio).collect();
-    let (mc_med_ratio, mc_count) = if !mc_trials.is_empty() {
-        let mut sorted = mc_trials.clone();
+    // Futility monitor stats
+    let fut_recommended_count = trials.iter().filter(|t| t.futility_ever_recommended).count();
+    let fut_ratios: Vec<f64> = trials.iter().filter_map(|t| t.futility_worst_ratio).collect();
+    let fut_med_ratio = if !fut_ratios.is_empty() {
+        let mut sorted = fut_ratios.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (sorted[sorted.len() / 2], mc_trials.len())
-    } else { (0.0, 0) };
+        sorted[sorted.len() / 2]
+    } else { 0.0 };
+    // Recovery rate: of those where stop was recommended, how many would have succeeded?
+    let fut_would_recover = trials.iter()
+        .filter(|t| t.futility_ever_recommended && t.stop_n.is_some())
+        .count();
+    let fut_recovery_rate = if fut_recommended_count > 0 {
+        fut_would_recover as f64 / fut_recommended_count as f64 * 100.0
+    } else { 0.0 };
 
     // === CONSOLE OUTPUT ===
     let mut out = String::with_capacity(2048);
@@ -258,7 +258,12 @@ pub fn run() {
     out.push_str(&format!("N:           {}\n", n_patients));
     out.push_str(&format!("Simulations: {}\n", n_sims));
     out.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, 1.0/threshold));
-    out.push_str(&format!("Futility:    {}\n", fut_watch));
+    if let Some(ref cfg) = futility_config {
+        out.push_str(&format!("Futility:    recovery={:.0}% ratio={:.2}x\n",
+            cfg.recovery_target * 100.0, cfg.stop_ratio));
+    } else {
+        out.push_str("Futility:    disabled\n");
+    }
     if let Some(p) = target_power {
         out.push_str(&format!("Target Pwr:  {:.0}%\n", p * 100.0));
     }
@@ -279,6 +284,15 @@ pub fn run() {
         out.push_str(&format!("ARR @ stop:    {:.1}%\n", avg_arr_stop * 100.0));
         out.push_str(&format!("ARR @ end:     {:.1}%\n", avg_arr_end * 100.0));
         out.push_str(&format!("Type M:        {:.2}x\n", type_m));
+    }
+
+    if run_futility && fut_recommended_count > 0 {
+        out.push_str("\n--- Futility Monitor ---\n");
+        out.push_str(&format!("Stop recommended:  {} ({:.1}%)\n",
+            fut_recommended_count, fut_recommended_count as f64 / n_sims as f64 * 100.0));
+        out.push_str(&format!("Would recover:     {} ({:.1}%)\n",
+            fut_would_recover, fut_recovery_rate));
+        out.push_str(&format!("Median ratio:      {:.2}x\n", fut_med_ratio));
     }
 
     print!("\n{}", out);
@@ -305,9 +319,10 @@ pub fn run() {
 
     // === BUILD HTML ===
     let html = build_report(
-        &out, threshold, fut_watch, n_patients, run_mc,
+        &out, threshold, n_patients, run_futility,
         &x_pts, &y_lo, &y_med, &y_hi, &sample_trajs,
-        &stop_times, &grid, n_sims, mc_count, mc_med_ratio, &mc_trials,
+        &stop_times, &grid, n_sims,
+        fut_recommended_count, fut_med_ratio, &fut_ratios,
     );
 
     File::create("binary_report.html").unwrap().write_all(html.as_bytes()).unwrap();
@@ -315,10 +330,10 @@ pub fn run() {
 }
 
 fn build_report(
-    console: &str, threshold: f64, fut_watch: f64, n_pts: usize, run_mc: bool,
+    console: &str, threshold: f64, n_pts: usize, run_futility: bool,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64], trajs: &[Vec<f64>],
     stops: &[f64], grid: &[(f64, usize, usize, usize, f64)], n_sims: usize,
-    mc_count: usize, mc_ratio: f64, mc_ratios: &[f64],
+    fut_count: usize, fut_ratio: f64, fut_ratios: &[f64],
 ) -> String {
     let x_js = format!("{:?}", x);
 
@@ -353,19 +368,20 @@ fn build_report(
         g_th.push(th); g_z.push(pct_z); g_e.push(pct_e);
     }
 
-    // MC ECDF
-    let (mc_div, mc_plot) = if run_mc && !mc_ratios.is_empty() {
-        let mut s = mc_ratios.to_vec();
+    // Futility ratio ECDF
+    let (fut_div, fut_plot) = if run_futility && !fut_ratios.is_empty() {
+        let mut s = fut_ratios.to_vec();
         s.sort_by(|a,b| a.partial_cmp(b).unwrap());
         let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64).collect();
         (
-            "<h3>Recovery Difficulty</h3><div id=\"p5\" style=\"height:280px\"></div>".into(),
-            format!("Plotly.newPlot('p5',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],{{xaxis:{{title:'Required/Design Ratio'}},yaxis:{{title:'Cumulative'}},shapes:[{{type:'line',x0:1,x1:1,y0:0,y1:1,line:{{color:'green',dash:'dash'}}}}]}});", s, y)
+            "<h3>Recovery Difficulty (Ratio Distribution)</h3><div id=\"p5\" style=\"height:280px\"></div>".into(),
+            format!("Plotly.newPlot('p5',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],{{xaxis:{{title:'Required ARR / Design ARR'}},yaxis:{{title:'Cumulative'}},shapes:[{{type:'line',x0:1,x1:1,y0:0,y1:1,line:{{color:'green',dash:'dash'}}}},{{type:'line',x0:1.75,x1:1.75,y0:0,y1:1,line:{{color:'red',dash:'dot'}}}}]}});", s, y)
         )
     } else { (String::new(), String::new()) };
 
-    let mc_txt = if run_mc && mc_count > 0 {
-        format!("MC @ {:.1}: {} triggered, median ratio {:.2}x\n", fut_watch, mc_count, mc_ratio)
+    let fut_txt = if run_futility && fut_count > 0 {
+        format!("Futility: {} triggered ({:.1}%), median ratio {:.2}x\n",
+            fut_count, fut_count as f64 / n_sims as f64 * 100.0, fut_ratio)
     } else { String::new() };
 
     format!(r#"<!DOCTYPE html>
@@ -398,8 +414,7 @@ Plotly.newPlot('p1',[
   {{type:'scatter',x:{},y:{:?},line:{{color:'#1f77b4',width:2}},name:'Median'}}
 ],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',dash:'dash',width:2}}}}]}});
 Plotly.newPlot('p2',[{}
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',dash:'dash',width:2}},name:'Threshold'}},
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'orange',dash:'dot'}},name:'Futility'}}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',dash:'dash',width:2}},name:'Threshold'}}
 ],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}}}});
 Plotly.newPlot('p3',[{{type:'scatter',mode:'lines',x:{},y:{},line:{{color:'steelblue',width:2}}}}],{{xaxis:{{title:'Stop (patients)'}},yaxis:{{title:'%',range:[0,100]}}}});
 Plotly.newPlot('p4',[
@@ -408,9 +423,9 @@ Plotly.newPlot('p4',[
 ],{{xaxis:{{title:'Threshold'}},yaxis:{{title:'%',range:[0,100]}}}});
 {}
 </script></body></html>"#,
-        console, mc_div, mc_txt, grid_tbl,
+        console, fut_div, fut_txt, grid_tbl,
         x_js, y_lo, x_js, y_hi, x_js, y_med, threshold, threshold,
-        traces, n_pts, threshold, threshold, n_pts, fut_watch, fut_watch,
-        stop_x, stop_y, g_th, g_z, g_th, g_e, mc_plot
+        traces, n_pts, threshold, threshold,
+        stop_x, stop_y, g_th, g_z, g_th, g_e, fut_plot
     )
 }

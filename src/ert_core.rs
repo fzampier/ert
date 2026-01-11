@@ -602,3 +602,489 @@ pub fn t_test_power_continuous(effect: f64, sd: f64, n_total: usize, alpha: f64)
     normal_cdf(z_effect - z_alpha)
 }
 
+// ============================================================================
+// FUTILITY MONITORING
+// ============================================================================
+//
+// IMPORTANT: This is NOT a martingale or e-process. It is a simulation-based
+// decision support tool that runs alongside the e-RT process.
+//
+// The FutilityMonitor uses Monte Carlo simulation to answer:
+// "What treatment effect (ARR) would we need for X% probability of recovery?"
+//
+// If the required ARR is much larger than the design ARR (ratio > stop_ratio),
+// the monitor recommends considering stopping for futility.
+//
+// This provides actionable information but does NOT have the anytime-valid
+// statistical guarantees of the e-process itself.
+//
+
+/// Checkpoint result from futility monitoring
+#[derive(Clone, Debug)]
+pub struct FutilityCheckpoint {
+    pub patient: usize,
+    pub wealth: f64,
+    pub mode: FutilityMode,
+    pub ratio: f64,           // required_arr / design_arr
+    pub required_arr: f64,    // ARR needed for recovery_target probability
+    pub recommend_stop: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FutilityMode {
+    Normal,  // Checking every normal_interval
+    Alert,   // Checking every alert_interval (wealth below danger threshold)
+}
+
+/// Configuration for futility monitoring (simulation-based, NOT a martingale)
+#[derive(Clone, Debug)]
+pub struct FutilityConfig {
+    pub recovery_target: f64,      // Default 0.10 (10% - "less than 10% chance of recovery")
+    pub normal_interval_pct: f64,  // Default 0.05 (check every 5% of N)
+    pub alert_interval_pct: f64,   // Default 0.01 (check every 1% when in danger)
+    pub danger_threshold: f64,     // Default 0.5 (wealth below this triggers alert mode)
+    pub stop_ratio: f64,           // Default 1.75 (recommend stop if ratio exceeds this)
+    pub mc_samples: usize,         // Default 200
+    pub binary_iterations: usize,  // Default 10
+    pub hysteresis_count: usize,   // Default 3 (consecutive checks above threshold to exit alert)
+}
+
+impl Default for FutilityConfig {
+    fn default() -> Self {
+        FutilityConfig {
+            recovery_target: 0.10,
+            normal_interval_pct: 0.05,
+            alert_interval_pct: 0.01,
+            danger_threshold: 0.5,
+            stop_ratio: 1.75,  // User can override; 1.75 = need 75% more than design ARR
+            mc_samples: 200,
+            binary_iterations: 10,
+            hysteresis_count: 3,
+        }
+    }
+}
+
+/// Futility monitor for binary e-RT trials
+pub struct FutilityMonitor {
+    pub config: FutilityConfig,
+    pub design_arr: f64,           // Design effect (p_ctrl - p_trt)
+    pub p_ctrl: f64,               // Control event rate
+    pub n_total: usize,            // Total planned sample size
+    pub threshold: f64,            // e-value threshold for success (e.g., 20)
+    pub burn_in: usize,
+    pub ramp: usize,
+
+    // State
+    mode: FutilityMode,
+    next_checkpoint: usize,
+    consecutive_above: usize,      // Count for hysteresis
+    pub checkpoints: Vec<FutilityCheckpoint>,
+}
+
+impl FutilityMonitor {
+    pub fn new(
+        config: FutilityConfig,
+        p_ctrl: f64,
+        p_trt: f64,
+        n_total: usize,
+        threshold: f64,
+        burn_in: usize,
+        ramp: usize,
+    ) -> Self {
+        let design_arr = (p_ctrl - p_trt).abs();
+        let first_checkpoint = ((n_total as f64 * config.normal_interval_pct).ceil() as usize)
+            .max(burn_in + 1);
+
+        FutilityMonitor {
+            config,
+            design_arr,
+            p_ctrl,
+            n_total,
+            threshold,
+            burn_in,
+            ramp,
+            mode: FutilityMode::Normal,
+            next_checkpoint: first_checkpoint,
+            consecutive_above: 0,
+            checkpoints: Vec::new(),
+        }
+    }
+
+    /// Check if we should evaluate futility at this patient number
+    pub fn should_check(&self, patient: usize) -> bool {
+        patient >= self.next_checkpoint && patient > self.burn_in
+    }
+
+    /// Perform futility check and return checkpoint result
+    /// Returns None if not at a checkpoint
+    pub fn check(&mut self, patient: usize, wealth: f64) -> Option<FutilityCheckpoint> {
+        if !self.should_check(patient) {
+            return None;
+        }
+
+        let n_remaining = self.n_total.saturating_sub(patient);
+
+        // Calculate required ARR for recovery_target probability
+        let required_arr = self.required_arr_for_recovery(wealth, n_remaining);
+        let ratio = if self.design_arr > 0.0 {
+            required_arr / self.design_arr
+        } else {
+            f64::INFINITY
+        };
+
+        // Determine mode transition
+        if wealth < self.config.danger_threshold {
+            self.mode = FutilityMode::Alert;
+            self.consecutive_above = 0;
+        } else {
+            self.consecutive_above += 1;
+            if self.consecutive_above >= self.config.hysteresis_count
+                && self.mode == FutilityMode::Alert {
+                self.mode = FutilityMode::Normal;
+            }
+        }
+
+        // Calculate next checkpoint
+        let interval = match self.mode {
+            FutilityMode::Normal => self.config.normal_interval_pct,
+            FutilityMode::Alert => self.config.alert_interval_pct,
+        };
+        let step = ((self.n_total as f64 * interval).ceil() as usize).max(1);
+        self.next_checkpoint = patient + step;
+
+        // Build checkpoint
+        let checkpoint = FutilityCheckpoint {
+            patient,
+            wealth,
+            mode: self.mode.clone(),
+            ratio,
+            required_arr,
+            recommend_stop: ratio > self.config.stop_ratio,
+        };
+
+        self.checkpoints.push(checkpoint.clone());
+        Some(checkpoint)
+    }
+
+    /// Monte Carlo binary search to find ARR needed for recovery_target probability
+    fn required_arr_for_recovery(&self, current_wealth: f64, n_remaining: usize) -> f64 {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        if n_remaining == 0 {
+            return f64::INFINITY;
+        }
+
+        // Already above threshold - no additional effect needed
+        if current_wealth >= self.threshold {
+            return 0.0;
+        }
+
+        let mut rng = StdRng::seed_from_u64(42); // Deterministic for reproducibility
+        let (mut lo, mut hi) = (0.0001, 0.50);
+
+        for _ in 0..self.config.binary_iterations {
+            let mid = (lo + hi) / 2.0;
+            let p_trt = (self.p_ctrl - mid).max(0.001);
+
+            let mut successes = 0usize;
+
+            for _ in 0..self.config.mc_samples {
+                let mut wealth = current_wealth;
+                let (mut n_t, mut e_t, mut n_c, mut e_c) = (0.0, 0.0, 0.0, 0.0);
+
+                for j in 1..=n_remaining {
+                    let is_trt = rng.gen_bool(0.5);
+                    let event = rng.gen_bool(if is_trt { p_trt } else { self.p_ctrl });
+
+                    // Estimate delta from accumulated data in this simulation
+                    let delta = if n_t > 0.0 && n_c > 0.0 {
+                        e_t / n_t - e_c / n_c
+                    } else {
+                        0.0
+                    };
+
+                    // Update counts
+                    if is_trt {
+                        n_t += 1.0;
+                        if event { e_t += 1.0; }
+                    } else {
+                        n_c += 1.0;
+                        if event { e_c += 1.0; }
+                    }
+
+                    // Apply e-process update (simplified - no burn-in in forward sim)
+                    let c = (j as f64 / self.ramp as f64).min(1.0);
+                    let outcome_sign = if event { 1.0 } else { -1.0 };
+                    let lambda = (0.5 + 0.5 * c * delta * outcome_sign).clamp(0.001, 0.999);
+                    let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
+                    wealth *= mult;
+
+                    if wealth >= self.threshold {
+                        successes += 1;
+                        break;
+                    }
+                }
+            }
+
+            let success_rate = successes as f64 / self.config.mc_samples as f64;
+
+            // Binary search: find ARR where success_rate = recovery_target
+            if success_rate < self.config.recovery_target {
+                lo = mid; // Need larger effect
+            } else {
+                hi = mid; // Effect is sufficient
+            }
+        }
+
+        (lo + hi) / 2.0
+    }
+
+    /// Get summary of futility monitoring
+    pub fn summary(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("\n--- Futility Monitoring Summary ---\n"));
+        s.push_str(&format!("Design ARR: {:.1}%\n", self.design_arr * 100.0));
+        s.push_str(&format!("Recovery target: {:.0}%\n", self.config.recovery_target * 100.0));
+        s.push_str(&format!("Stop ratio: {:.1}x\n", self.config.stop_ratio));
+        s.push_str(&format!("Checkpoints: {}\n\n", self.checkpoints.len()));
+
+        if self.checkpoints.is_empty() {
+            s.push_str("No checkpoints recorded.\n");
+            return s;
+        }
+
+        s.push_str("Patient | Wealth |  Mode  | Ratio | Req ARR | Recommend\n");
+        s.push_str("--------|--------|--------|-------|---------|----------\n");
+
+        for cp in &self.checkpoints {
+            let mode_str = match cp.mode {
+                FutilityMode::Normal => "NORMAL",
+                FutilityMode::Alert => "ALERT ",
+            };
+            let recommend = if cp.recommend_stop { "STOP" } else { "-" };
+            s.push_str(&format!(
+                "{:>7} | {:>6.3} | {} | {:>5.2}x | {:>6.1}% | {}\n",
+                cp.patient,
+                cp.wealth,
+                mode_str,
+                cp.ratio,
+                cp.required_arr * 100.0,
+                recommend
+            ));
+        }
+
+        // Final recommendation
+        if let Some(last) = self.checkpoints.last() {
+            s.push_str(&format!("\nFinal status: "));
+            if last.recommend_stop {
+                s.push_str(&format!(
+                    "RECOMMEND STOP (ratio {:.2}x > {:.1}x threshold)\n",
+                    last.ratio, self.config.stop_ratio
+                ));
+            } else {
+                s.push_str(&format!("Continue (ratio {:.2}x)\n", last.ratio));
+            }
+        }
+
+        s
+    }
+
+    /// Check if any checkpoint recommended stopping
+    pub fn ever_recommended_stop(&self) -> bool {
+        self.checkpoints.iter().any(|cp| cp.recommend_stop)
+    }
+
+    /// Get the worst (highest) ratio observed
+    pub fn worst_ratio(&self) -> Option<f64> {
+        self.checkpoints.iter().map(|cp| cp.ratio).fold(None, |acc, r| {
+            match acc {
+                None => Some(r),
+                Some(a) if r > a => Some(r),
+                Some(a) => Some(a),
+            }
+        })
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    #[test]
+    fn test_futility_monitor_basic() {
+        let config = FutilityConfig::default();
+        let mut monitor = FutilityMonitor::new(
+            config,
+            0.25,  // p_ctrl
+            0.20,  // p_trt (5% ARR)
+            500,   // n_total
+            20.0,  // threshold
+            50,    // burn_in
+            100,   // ramp
+        );
+
+        assert!(monitor.should_check(51));
+
+        let cp = monitor.check(51, 0.3);
+        assert!(cp.is_some());
+        let cp = cp.unwrap();
+        println!("Checkpoint: patient={}, wealth={:.3}, ratio={:.2}x, recommend_stop={}",
+                 cp.patient, cp.wealth, cp.ratio, cp.recommend_stop);
+
+        assert_eq!(monitor.mode, FutilityMode::Alert);
+    }
+
+    #[test]
+    fn test_futility_monitor_recovery() {
+        let config = FutilityConfig::default();
+        let mut monitor = FutilityMonitor::new(
+            config,
+            0.25,
+            0.20,
+            500,
+            20.0,
+            50,
+            100,
+        );
+
+        let cp = monitor.check(51, 5.0);
+        assert!(cp.is_some());
+        let cp = cp.unwrap();
+        assert!(!cp.recommend_stop);
+        assert_eq!(cp.mode, FutilityMode::Normal);
+    }
+
+    /// Helper: run calibration test for a given ARR
+    fn run_calibration(p_ctrl: f64, arr: f64, n_total: usize, n_sims: usize, seed: u64) -> (f64, f64, f64, f64) {
+        let p_trt = p_ctrl - arr;
+        let threshold = 20.0;
+        let burn_in = 50;
+        let ramp = 100;
+
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut recommended_stop = 0usize;
+        let mut would_have_recovered = 0usize;
+        let mut never_recommended = 0usize;
+        let mut never_recommended_success = 0usize;
+
+        for _ in 0..n_sims {
+            let config = FutilityConfig::default();
+            let mut monitor = FutilityMonitor::new(
+                config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
+            );
+            let mut proc = BinaryERTProcess::new(burn_in, ramp);
+
+            let mut ever_recommended_stop = false;
+            let mut crossed = false;
+
+            for i in 1..=n_total {
+                let is_trt = rng.gen_bool(0.5);
+                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
+                proc.update(i, if event { 1.0 } else { 0.0 }, is_trt);
+
+                if proc.wealth >= threshold {
+                    crossed = true;
+                }
+
+                if let Some(cp) = monitor.check(i, proc.wealth) {
+                    if cp.recommend_stop && !ever_recommended_stop {
+                        ever_recommended_stop = true;
+                    }
+                }
+            }
+
+            if ever_recommended_stop {
+                recommended_stop += 1;
+                if crossed { would_have_recovered += 1; }
+            } else {
+                never_recommended += 1;
+                if crossed { never_recommended_success += 1; }
+            }
+        }
+
+        let stop_rate = recommended_stop as f64 / n_sims as f64 * 100.0;
+        let recovery_rate = if recommended_stop > 0 {
+            would_have_recovered as f64 / recommended_stop as f64 * 100.0
+        } else { 0.0 };
+        let no_stop_success = if never_recommended > 0 {
+            never_recommended_success as f64 / never_recommended as f64 * 100.0
+        } else { 0.0 };
+        let overall_success = (would_have_recovered + never_recommended_success) as f64 / n_sims as f64 * 100.0;
+
+        (stop_rate, recovery_rate, no_stop_success, overall_success)
+    }
+
+    /// Test across varying effect sizes
+    #[test]
+    fn test_futility_varying_effect_sizes() {
+        let p_ctrl = 0.30;
+        let n_total = 1000;
+        let n_sims = 300;  // Reduced for speed, increase for precision
+
+        println!("\n=== FUTILITY CALIBRATION ACROSS EFFECT SIZES ===");
+        println!("Control rate: {:.0}%, N={}, Sims={}", p_ctrl * 100.0, n_total, n_sims);
+        println!("Recovery target: 10%, Stop ratio: 1.75x\n");
+        println!("  ARR  | Stop% | Recovery% | No-Stop Success% | Overall Success%");
+        println!("-------|-------|-----------|------------------|------------------");
+
+        let arrs = [0.0, 0.03, 0.05, 0.07, 0.10];
+
+        for (i, &arr) in arrs.iter().enumerate() {
+            let (stop_rate, recovery_rate, no_stop_success, overall_success) =
+                run_calibration(p_ctrl, arr, n_total, n_sims, 10000 + i as u64);
+
+            println!(" {:>4.0}% | {:>5.1} | {:>9.1} | {:>16.1} | {:>16.1}",
+                     arr * 100.0, stop_rate, recovery_rate, no_stop_success, overall_success);
+        }
+
+        println!("\nInterpretation:");
+        println!("- Recovery%: Of trials where STOP recommended, % that would have succeeded");
+        println!("- Target is ~10% (should be low = good calibration)");
+        println!("- No-Stop Success%: Of trials without STOP, % that succeeded (should be high)");
+    }
+
+    /// Test under H0: should recommend stop frequently
+    #[test]
+    fn test_futility_under_h0() {
+        let (stop_rate, recovery_rate, _, _) = run_calibration(0.25, 0.0, 1000, 300, 54321);
+
+        println!("\n=== H0 VALIDATION (No Effect) ===");
+        println!("Recommended STOP: {:.1}%", stop_rate);
+        println!("Would have crossed (Type I): {:.1}%", recovery_rate);
+
+        assert!(stop_rate > 50.0, "Should recommend STOP >50% under H0, got {:.1}%", stop_rate);
+    }
+
+    /// Quick sanity check for basic functionality
+    #[test]
+    fn test_futility_monitor_sanity() {
+        let config = FutilityConfig::default();
+        assert_eq!(config.stop_ratio, 1.75);
+        assert_eq!(config.recovery_target, 0.10);
+
+        let mut monitor = FutilityMonitor::new(
+            config, 0.25, 0.20, 500, 20.0, 50, 100,
+        );
+
+        // Low wealth should recommend stop
+        let cp = monitor.check(51, 0.2);
+        assert!(cp.is_some());
+        println!("Low wealth: ratio={:.2}x, recommend_stop={}", cp.as_ref().unwrap().ratio, cp.as_ref().unwrap().recommend_stop);
+
+        // Reset and check high wealth
+        let config2 = FutilityConfig::default();
+        let mut monitor2 = FutilityMonitor::new(
+            config2, 0.25, 0.20, 500, 20.0, 50, 100,
+        );
+        let cp2 = monitor2.check(51, 10.0);
+        assert!(cp2.is_some());
+        assert!(!cp2.unwrap().recommend_stop, "High wealth should not recommend stop");
+    }
+}

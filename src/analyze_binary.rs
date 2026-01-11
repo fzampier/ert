@@ -5,12 +5,11 @@ use std::fs::File;
 use std::io::Write;
 use csv::ReaderBuilder;
 use serde::Deserialize;
-use rand::Rng;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+// rand no longer needed - FutilityMonitor uses internal RNG
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_string, chrono_lite, BinaryERTProcess,
+    FutilityMonitor, FutilityConfig,
 };
 
 // === DATA STRUCTURES ===
@@ -31,14 +30,6 @@ struct DesignParams {
     design_arr: f64,
 }
 
-#[derive(Clone)]
-struct FutilityPoint {
-    patient_num: usize,
-    _wealth: f64,
-    _required_arr: f64,
-    ratio_to_design: f64,
-}
-
 struct AnalysisResult {
     n_total: usize,
     n_trt: usize,
@@ -54,8 +45,9 @@ struct AnalysisResult {
     type_m: Option<f64>,
     final_evalue: f64,
     trajectory: Vec<f64>,
-    futility_points: Vec<FutilityPoint>,
-    futility_regions: Vec<(usize, usize)>,
+    futility_summary: Option<String>,
+    futility_recommended_stop: bool,
+    futility_worst_ratio: Option<f64>,
     design: Option<DesignParams>,
 }
 
@@ -192,57 +184,11 @@ fn read_csv(path: &str) -> Result<Vec<(u8, u8)>, Box<dyn Error>> {
     Ok(data)
 }
 
-// === MONTE CARLO: REQUIRED ARR FOR RECOVERY ===
-
-fn required_arr_for_recovery(
-    wealth: f64, n_remaining: usize, p_ctrl: f64,
-    burn_in: usize, ramp: usize, threshold: f64,
-) -> f64 {
-    if n_remaining == 0 { return 1.0; }
-
-    let mut rng = StdRng::seed_from_u64(42);
-    let (mut low, mut high) = (0.001, 0.50);
-
-    for _ in 0..8 {
-        let mid = (low + high) / 2.0;
-        let p_trt = (p_ctrl - mid).max(0.001);
-        let mut successes = 0;
-
-        for _ in 0..100 {
-            let mut w = wealth;
-            let (mut n_t, mut e_t, mut n_c, mut e_c) = (0.0, 0.0, 0.0, 0.0);
-
-            for j in 1..=n_remaining {
-                let is_trt = rng.gen_bool(0.5);
-                let outcome = if rng.gen_bool(if is_trt { p_trt } else { p_ctrl }) { 1.0 } else { 0.0 };
-
-                let r_t = if n_t > 0.0 { e_t / n_t } else { 0.5 };
-                let r_c = if n_c > 0.0 { e_c / n_c } else { 0.5 };
-                let delta = r_t - r_c;
-
-                if is_trt { n_t += 1.0; if outcome == 1.0 { e_t += 1.0; } }
-                else { n_c += 1.0; if outcome == 1.0 { e_c += 1.0; } }
-
-                if j > burn_in {
-                    let c_i = ((j - burn_in) as f64 / ramp as f64).clamp(0.0, 1.0);
-                    let lambda = if outcome == 1.0 { 0.5 + 0.5 * c_i * delta } else { 0.5 - 0.5 * c_i * delta };
-                    let mult = if is_trt { lambda.clamp(0.001, 0.999) / 0.5 } else { (1.0 - lambda.clamp(0.001, 0.999)) / 0.5 };
-                    w *= mult;
-                }
-                if w >= threshold { successes += 1; break; }
-            }
-        }
-
-        if (successes as f64 / 100.0) < 0.5 { low = mid; } else { high = mid; }
-    }
-    (low + high) / 2.0
-}
-
 // === ANALYSIS ===
 
 fn analyze(
     data: &[(u8, u8)], burn_in: usize, ramp: usize, threshold: f64,
-    fut_thresh: Option<f64>, design: Option<DesignParams>,
+    _fut_thresh: Option<f64>, design: Option<DesignParams>,
 ) -> AnalysisResult {
     let n_total = data.len();
     let mut proc = BinaryERTProcess::new(burn_in, ramp);
@@ -253,11 +199,18 @@ fn analyze(
     let mut risk_diff_at_cross = None;
     let mut or_at_cross = None;
 
-    let checkpoint = (n_total as f64 * 0.02).ceil() as usize;
-    let mut fut_points: Vec<FutilityPoint> = Vec::new();
-    let mut fut_regions: Vec<(usize, usize)> = Vec::new();
-    let mut in_fut = false;
-    let mut fut_start = 0;
+    // Create FutilityMonitor if design params available
+    let mut fut_monitor = design.as_ref().map(|d| {
+        FutilityMonitor::new(
+            FutilityConfig::default(),
+            d.design_arr,
+            d.control_rate,
+            n_total,
+            threshold,
+            burn_in,
+            ramp,
+        )
+    });
 
     for (i, &(treatment, outcome)) in data.iter().enumerate() {
         let patient = i + 1;
@@ -271,20 +224,13 @@ fn analyze(
             or_at_cross = Some(proc.current_odds_ratio());
         }
 
-        if let (Some(fut), Some(ref d)) = (fut_thresh, &design) {
-            let below = proc.wealth < fut;
-            if below && !in_fut { in_fut = true; fut_start = patient; }
-            else if !below && in_fut { in_fut = false; fut_regions.push((fut_start, patient - 1)); }
-
-            if below && patient % checkpoint == 0 && patient > burn_in {
-                let req = required_arr_for_recovery(proc.wealth, n_total - patient, d.control_rate, burn_in, ramp, threshold);
-                fut_points.push(FutilityPoint {
-                    patient_num: patient, _wealth: proc.wealth, _required_arr: req, ratio_to_design: req / d.design_arr,
-                });
+        // Futility monitoring
+        if let Some(ref mut monitor) = fut_monitor {
+            if monitor.should_check(patient) {
+                monitor.check(patient, proc.wealth);
             }
         }
     }
-    if in_fut { fut_regions.push((fut_start, n_total)); }
 
     let final_rd = proc.current_risk_diff();
     let final_or = proc.current_odds_ratio();
@@ -297,10 +243,21 @@ fn analyze(
         if rd_f > 0.0 { Some(rd_c / rd_f) } else { None }
     } else { None };
 
+    // Extract futility results
+    let (fut_summary, fut_stop, fut_ratio) = if let Some(monitor) = fut_monitor {
+        (Some(monitor.summary()), monitor.ever_recommended_stop(), monitor.worst_ratio())
+    } else {
+        (None, false, None)
+    };
+
     AnalysisResult {
         n_total, n_trt, n_ctrl, crossed, crossed_at, risk_diff_at_cross, or_at_cross,
         final_risk_diff: final_rd, final_or, rate_trt, rate_ctrl, type_m,
-        final_evalue: proc.wealth, trajectory, futility_points: fut_points, futility_regions: fut_regions, design,
+        final_evalue: proc.wealth, trajectory,
+        futility_summary: fut_summary,
+        futility_recommended_stop: fut_stop,
+        futility_worst_ratio: fut_ratio,
+        design,
     }
 }
 
@@ -341,11 +298,15 @@ fn print_results(r: &AnalysisResult, threshold: f64, fut_thresh: Option<f64>) {
     println!("Control:   {:.1}% (n={})", r.rate_ctrl * 100.0, r.n_ctrl);
 
     if let Some(ref d) = r.design {
-        println!("\n--- Futility ---");
-        println!("Design ARR: {:.1}%", d.design_arr * 100.0);
-        println!("Episodes:   {}", r.futility_regions.len());
-        if let Some(worst) = r.futility_points.iter().max_by(|a, b| a.ratio_to_design.partial_cmp(&b.ratio_to_design).unwrap()) {
-            println!("Worst:      {:.2}x design at patient {}", worst.ratio_to_design, worst.patient_num);
+        println!("\n--- Futility Monitor ---");
+        println!("(Simulation-based, NOT anytime-valid)");
+        println!("Design ARR:       {:.1}%", d.design_arr * 100.0);
+        println!("Stop recommended: {}", if r.futility_recommended_stop { "YES" } else { "No" });
+        if let Some(ratio) = r.futility_worst_ratio {
+            println!("Worst ratio:      {:.2}x design", ratio);
+        }
+        if let Some(ref summary) = r.futility_summary {
+            println!("\n{}", summary);
         }
     }
 }
@@ -368,26 +329,22 @@ fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize,
 
     let type_m = r.type_m.map_or(String::new(), |t| format!("<tr><td>Type M:</td><td>{:.2}x</td></tr>", t));
 
-    let fut_line = fut_thresh.map_or(String::new(), |f|
+    let _fut_line = fut_thresh.map_or(String::new(), |f|
         format!("{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',dash:'dot'}}}},", f, f));
 
-    let mut fut_shapes = String::new();
-    for (s, e) in &r.futility_regions {
-        fut_shapes.push_str(&format!("{{type:'rect',x0:{},x1:{},y0:0,y1:1,yref:'paper',fillcolor:'rgba(255,165,0,0.15)',line:{{width:0}}}},", s, e));
-    }
-
     let fut_section = if let Some(ref d) = r.design {
-        let worst = r.futility_points.iter().max_by(|a, b| a.ratio_to_design.partial_cmp(&b.ratio_to_design).unwrap());
-        format!(r#"<h2>Futility Analysis</h2>
-<p><em>Decision support only, not anytime-valid inference.</em></p>
+        format!(r#"<h2>Futility Monitor</h2>
+<p><em>Simulation-based decision support, NOT anytime-valid inference.</em></p>
 <table>
 <tr><td>Design ARR:</td><td>{:.1}%</td></tr>
-<tr><td>Episodes below threshold:</td><td>{}</td></tr>
-<tr><td>Worst point:</td><td>{}</td></tr>
-</table>"#,
+<tr><td>Stop recommended:</td><td>{}</td></tr>
+<tr><td>Worst ratio:</td><td>{}</td></tr>
+</table>
+<pre>{}</pre>"#,
             d.design_arr * 100.0,
-            r.futility_regions.len(),
-            worst.map_or("N/A".into(), |w| format!("{:.2}x at patient {}", w.ratio_to_design, w.patient_num)))
+            if r.futility_recommended_stop { "<strong style='color:red'>YES</strong>" } else { "No" },
+            r.futility_worst_ratio.map_or("N/A".into(), |w| format!("{:.2}x design", w)),
+            r.futility_summary.as_deref().unwrap_or(""))
     } else { String::new() };
 
     format!(r#"<!DOCTYPE html>
@@ -434,11 +391,11 @@ table{{margin:10px 0}}td{{padding:4px 12px}}
 <script>
 Plotly.newPlot('p1',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'steelblue',width:2}}}}],{{
 yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},
-shapes:[{}{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',dash:'dash',width:2}}}}{}]}});
+shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',dash:'dash',width:2}}}}]}});
 </script>
 </body></html>"#,
         chrono_lite(), csv_path, r.n_total, r.n_trt, r.rate_trt * 100.0, r.n_ctrl, r.rate_ctrl * 100.0,
         burn_in, ramp, threshold,
         r.final_evalue, status, crossing, r.final_risk_diff * 100.0, or, lo, hi, type_m, fut_section,
-        x, r.trajectory, fut_shapes, threshold, threshold, fut_line)
+        x, r.trajectory, threshold, threshold)
 }
