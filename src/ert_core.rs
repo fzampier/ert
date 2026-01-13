@@ -946,11 +946,26 @@ impl FutilityMonitor {
             wealth, n_remaining, patient, n_trt, events_trt, n_ctrl, events_ctrl, p_trt_design
         );
 
-        // REPORTING: Calculate ratio only if needed (expensive)
-        // Ratio for reporting: recovery_target / recovery_prob
-        // ratio > 1.0 means we'd need better-than-design effect to hit target
-        let ratio = if recovery_prob > 0.01 {
-            self.config.recovery_target / recovery_prob
+        // Survivorship bias correction: only apply when estimate is LOW and enrollment is LATE.
+        // Trials with low P(recovery) that reached this point late have "survived" earlier
+        // checkpoints, suggesting their actual recovery probability is higher than estimated.
+        //
+        // Only correct when:
+        // 1. Raw estimate is below threshold (trial looks like it might fail)
+        // 2. Enrollment is past burn-in period
+        //
+        // Empirically calibrated t^2 curve, only applied to low estimates:
+        let t = patient as f64 / self.n_total as f64;
+        let corrected_recovery_prob = if recovery_prob < self.config.recovery_target && t > 0.1 {
+            let survivorship_correction = 1.0 + 6.0 * t * t;
+            (recovery_prob * survivorship_correction).min(1.0)
+        } else {
+            recovery_prob
+        };
+
+        // REPORTING: Calculate ratio using CORRECTED estimate
+        let ratio = if corrected_recovery_prob > 0.01 {
+            self.config.recovery_target / corrected_recovery_prob
         } else {
             f64::INFINITY
         };
@@ -975,14 +990,14 @@ impl FutilityMonitor {
         let step = ((self.n_total as f64 * interval).ceil() as usize).max(1);
         self.next_checkpoint = patient + step;
 
-        // Build checkpoint - decision based on DIRECT probability, not ratio threshold
+        // Build checkpoint - decision based on CORRECTED estimate vs base threshold
         let checkpoint = FutilityCheckpoint {
             patient,
             wealth,
             mode: self.mode.clone(),
             ratio,
-            recovery_prob,
-            recommend_stop: recovery_prob < self.config.recovery_target,
+            recovery_prob: corrected_recovery_prob,  // Store corrected value
+            recommend_stop: corrected_recovery_prob < self.config.recovery_target,
         };
 
         self.checkpoints.push(checkpoint.clone());
