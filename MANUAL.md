@@ -624,35 +624,31 @@ The monitor estimates P(recovery), the probability that the trial will eventuall
 **How it works:**
 
 1. At regular checkpoints, uses Monte Carlo forward simulation to estimate P(recovery) at design effect
-2. If P(recovery) < recovery_target (default 10%), recommends stopping
-3. Reports ratio = recovery_target / P(recovery) for interpretability
+2. Compares P(recovery) against an enrollment-adjusted threshold
+3. Reports ratio = base_threshold / P(recovery) for interpretability
 
-**Survivorship Bias Correction:**
+**Enrollment-Adjusted Threshold:**
 
-Trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints—they weren't flagged earlier, suggesting better underlying prospects than the current estimate implies.
-
-The monitor corrects for this by inflating late, low estimates:
+Trials that only cross below threshold late have been hovering near the margin—the crossing is more likely a pessimistic noise fluctuation than signal. To address this, the threshold becomes stricter as enrollment increases:
 
 ```
-For trials with recovery_prob < threshold and t > 0.1:
-    survivorship_correction = 1.0 + 6.0 * t²
-    corrected_prob = recovery_prob * survivorship_correction
+adjusted_threshold = recovery_target × (1 - 0.5 × √t)
 ```
 
 where t = enrollment fraction (patient / N_total).
 
-**Calibration (with correction):**
-
-| Timing | Estimated | Actual | Status |
-|--------|-----------|--------|--------|
-| Early (<50% of N) | ~6% | ~8% | Well calibrated |
-| Late (≥50% of N) | ~4% | ~12% | Improved (was ~20-25% without correction) |
+| Enrollment (t) | Adjusted Threshold |
+|----------------|-------------------|
+| 25% | 7.5% |
+| 50% | 6.5% |
+| 75% | 5.7% |
+| 100% | 5.0% |
 
 **Practical interpretation:**
 
+- Early recommendations use lenient threshold (easier to trigger stop)
+- Late recommendations require stronger evidence (lower P(recovery))
 - When stop is recommended, actual recovery is always well below 50%
-- Early recommendations remain reliable
-- Late recommendations improved but still somewhat pessimistic due to residual survivorship bias
 
 Under H0 (no effect):
 - 100% of trials recommended for stop

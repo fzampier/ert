@@ -946,26 +946,16 @@ impl FutilityMonitor {
             wealth, n_remaining, patient, n_trt, events_trt, n_ctrl, events_ctrl, p_trt_design
         );
 
-        // Survivorship bias correction: only apply when estimate is LOW and enrollment is LATE.
-        // Trials with low P(recovery) that reached this point late have "survived" earlier
-        // checkpoints, suggesting their actual recovery probability is higher than estimated.
-        //
-        // Only correct when:
-        // 1. Raw estimate is below threshold (trial looks like it might fail)
-        // 2. Enrollment is past burn-in period
-        //
-        // Empirically calibrated t^2 curve, only applied to low estimates:
+        // Enrollment-adjusted threshold: stricter threshold later in trial.
+        // Trials that only cross below threshold late have been hovering near the margin;
+        // the crossing is more likely a pessimistic noise fluctuation than signal.
+        // Threshold decreases as enrollment increases: 10% -> 7.5% -> 6.5% -> 5%
         let t = patient as f64 / self.n_total as f64;
-        let corrected_recovery_prob = if recovery_prob < self.config.recovery_target && t > 0.1 {
-            let survivorship_correction = 1.0 + 6.0 * t * t;
-            (recovery_prob * survivorship_correction).min(1.0)
-        } else {
-            recovery_prob
-        };
+        let adjusted_threshold = self.config.recovery_target * (1.0 - 0.5 * t.sqrt());
 
-        // REPORTING: Calculate ratio using CORRECTED estimate
-        let ratio = if corrected_recovery_prob > 0.01 {
-            self.config.recovery_target / corrected_recovery_prob
+        // REPORTING: Calculate ratio using raw estimate vs base threshold
+        let ratio = if recovery_prob > 0.01 {
+            self.config.recovery_target / recovery_prob
         } else {
             f64::INFINITY
         };
@@ -990,14 +980,14 @@ impl FutilityMonitor {
         let step = ((self.n_total as f64 * interval).ceil() as usize).max(1);
         self.next_checkpoint = patient + step;
 
-        // Build checkpoint - decision based on CORRECTED estimate vs base threshold
+        // Build checkpoint - decision based on raw estimate vs enrollment-adjusted threshold
         let checkpoint = FutilityCheckpoint {
             patient,
             wealth,
             mode: self.mode.clone(),
             ratio,
-            recovery_prob: corrected_recovery_prob,  // Store corrected value
-            recommend_stop: corrected_recovery_prob < self.config.recovery_target,
+            recovery_prob,  // Store raw estimate
+            recommend_stop: recovery_prob < adjusted_threshold,
         };
 
         self.checkpoints.push(checkpoint.clone());
@@ -1507,5 +1497,294 @@ mod tests {
         let cp2 = monitor2.check(51, 10.0, n_trt, events_trt, n_ctrl, events_ctrl);
         assert!(cp2.is_some());
         assert!(!cp2.unwrap().recommend_stop, "High wealth should not recommend stop");
+    }
+
+    /// Compare survivorship correction vs O'Brien-Fleming adjusted threshold
+    /// Uses ACTUAL FutilityMonitor to get realistic estimates
+    #[test]
+    #[ignore]  // Run with: cargo test compare_correction_approaches -- --ignored --nocapture
+    fn compare_correction_approaches() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let p_ctrl = 0.30;
+        let p_trt = 0.20;  // 10% ARR design effect
+        let n_total = 589;
+        let threshold = 20.0;
+        let burn_in = 50;
+        let ramp = 100;
+        let base_recovery_target = 0.10;
+
+        let mut rng = StdRng::seed_from_u64(54321);
+        let n_sims = 500;  // Fewer sims since using real monitor
+        let midpoint = n_total / 2;
+
+        // Track FIRST stop recommendation per trial: (patient, raw_est, corrected_est, succeeded)
+        // We'll compute corrections ourselves to compare approaches
+        let mut results: Vec<(usize, f64, bool)> = Vec::new();
+
+        for _ in 0..n_sims {
+            let mut proc = BinaryERTProcess::new(burn_in, ramp);
+
+            // Use actual FutilityMonitor with NO correction to get raw estimates
+            let config = FutilityConfig {
+                mc_samples: 200,
+                ..Default::default()
+            };
+            let mut monitor = FutilityMonitor::new(
+                config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
+            );
+
+            let mut first_low_checkpoint: Option<(usize, f64)> = None;
+
+            for patient in 1..=n_total {
+                let is_trt = rng.gen_bool(0.5);
+                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
+                proc.update(patient, if event { 1.0 } else { 0.0 }, is_trt);
+
+                // Check with monitor
+                if let Some(cp) = monitor.check(
+                    patient, proc.wealth,
+                    proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl
+                ) {
+                    // Get RAW estimate (before survivorship correction)
+                    // The monitor applies correction, so we need to reverse it
+                    let t = patient as f64 / n_total as f64;
+                    let raw_est = if cp.recovery_prob < base_recovery_target && t > 0.1 {
+                        // Reverse the correction: raw = corrected / (1 + 6*t²)
+                        cp.recovery_prob / (1.0 + 6.0 * t * t)
+                    } else {
+                        cp.recovery_prob
+                    };
+
+                    // Record first checkpoint with raw < 15%
+                    if raw_est < 0.15 && first_low_checkpoint.is_none() {
+                        first_low_checkpoint = Some((patient, raw_est));
+                    }
+                }
+
+                if proc.wealth >= threshold { break; }
+            }
+
+            let succeeded = proc.wealth >= threshold;
+
+            if let Some((patient, raw_est)) = first_low_checkpoint {
+                results.push((patient, raw_est, succeeded));
+            }
+        }
+
+        println!("\n================================================================");
+        println!("  CORRECTION APPROACH COMPARISON");
+        println!("  Using ACTUAL FutilityMonitor, {} sims", n_sims);
+        println!("================================================================\n");
+
+        let early: Vec<_> = results.iter().filter(|(p, _, _)| *p < midpoint).collect();
+        let late: Vec<_> = results.iter().filter(|(p, _, _)| *p >= midpoint).collect();
+
+        // Key distinction: trials that FIRST got flagged early vs late
+        // Late-only = survived early checkpoints (the survivorship bias scenario)
+        println!("Total trials with low estimate: {}", results.len());
+        println!("  First flagged early (<50%):  {} (no survivorship bias)", early.len());
+        println!("  First flagged late (>=50%):  {} (SURVIVORSHIP BIAS)", late.len());
+
+        println!("\n--- EARLY CHECKPOINTS (<50% enrollment) ---");
+        if !early.is_empty() {
+            let avg_raw = early.iter().map(|(_, e, _)| *e).sum::<f64>() / early.len() as f64;
+            let actual = early.iter().filter(|(_, _, s)| *s).count() as f64 / early.len() as f64;
+            println!("  Avg raw estimate: {:.1}%", avg_raw * 100.0);
+            println!("  Actual recovery:  {:.1}%", actual * 100.0);
+
+            // Test different corrections
+            let t_avg = early.iter().map(|(p, _, _)| *p as f64 / n_total as f64).sum::<f64>() / early.len() as f64;
+
+            // Survivorship: est *= (1 + 6*t²)
+            let surv_est: f64 = early.iter().map(|(p, e, _)| {
+                let t = *p as f64 / n_total as f64;
+                if *e < base_recovery_target && t > 0.1 {
+                    (*e * (1.0 + 6.0 * t * t)).min(1.0)
+                } else { *e }
+            }).sum::<f64>() / early.len() as f64;
+            println!("  Surv corrected:   {:.1}%", surv_est * 100.0);
+
+            // O'Brien-Fleming: would stop if raw < 10% * (1 - 0.5*sqrt(t))
+            let obf_stops = early.iter().filter(|(p, e, _)| {
+                let t = *p as f64 / n_total as f64;
+                let obf_thresh = base_recovery_target * (1.0 - 0.5 * t.sqrt());
+                *e < obf_thresh
+            }).count();
+            let obf_actual = early.iter().filter(|(p, e, s)| {
+                let t = *p as f64 / n_total as f64;
+                let obf_thresh = base_recovery_target * (1.0 - 0.5 * t.sqrt());
+                *e < obf_thresh && *s
+            }).count();
+            if obf_stops > 0 {
+                println!("  OBF would stop:   {} ({:.1}% recover)", obf_stops, 100.0 * obf_actual as f64 / obf_stops as f64);
+            }
+        }
+
+        println!("\n--- LATE CHECKPOINTS (>=50% enrollment, SURVIVORSHIP BIAS) ---");
+        if !late.is_empty() {
+            let avg_raw = late.iter().map(|(_, e, _)| *e).sum::<f64>() / late.len() as f64;
+            let actual = late.iter().filter(|(_, _, s)| *s).count() as f64 / late.len() as f64;
+            println!("  Avg raw estimate: {:.1}%", avg_raw * 100.0);
+            println!("  Actual recovery:  {:.1}%", actual * 100.0);
+            println!("  Bias ratio:       {:.1}x (actual/est)", actual / avg_raw.max(0.001));
+
+            let surv_est: f64 = late.iter().map(|(p, e, _)| {
+                let t = *p as f64 / n_total as f64;
+                if *e < base_recovery_target && t > 0.1 {
+                    (*e * (1.0 + 6.0 * t * t)).min(1.0)
+                } else { *e }
+            }).sum::<f64>() / late.len() as f64;
+            println!("  Surv corrected:   {:.1}%", surv_est * 100.0);
+
+            let obf_stops = late.iter().filter(|(p, e, _)| {
+                let t = *p as f64 / n_total as f64;
+                let obf_thresh = base_recovery_target * (1.0 - 0.5 * t.sqrt());
+                *e < obf_thresh
+            }).count();
+            let obf_actual = late.iter().filter(|(p, e, s)| {
+                let t = *p as f64 / n_total as f64;
+                let obf_thresh = base_recovery_target * (1.0 - 0.5 * t.sqrt());
+                *e < obf_thresh && *s
+            }).count();
+            if obf_stops > 0 {
+                println!("  OBF would stop:   {} ({:.1}% recover)", obf_stops, 100.0 * obf_actual as f64 / obf_stops as f64);
+            }
+
+            // Key comparison for LATE trials: among those where raw < 10%
+            let late_low: Vec<_> = late.iter().filter(|(_, e, _)| *e < base_recovery_target).collect();
+            if !late_low.is_empty() {
+                let ll_est = late_low.iter().map(|(_, e, _)| *e).sum::<f64>() / late_low.len() as f64;
+                let ll_act = late_low.iter().filter(|(_, _, s)| *s).count() as f64 / late_low.len() as f64;
+                println!("\n  LATE with raw<10% (n={}): {:.1}% est vs {:.1}% actual",
+                         late_low.len(), ll_est * 100.0, ll_act * 100.0);
+            }
+        }
+
+        // Summary comparison
+        println!("\n--- SUMMARY: Who would stop and recovery rates ---");
+
+        // No correction: raw < 10%
+        let no_corr_stops: Vec<_> = results.iter().filter(|(_, e, _)| *e < base_recovery_target).collect();
+        if !no_corr_stops.is_empty() {
+            let est = no_corr_stops.iter().map(|(_, e, _)| *e).sum::<f64>() / no_corr_stops.len() as f64;
+            let act = no_corr_stops.iter().filter(|(_, _, s)| *s).count() as f64 / no_corr_stops.len() as f64;
+            println!("NO CORRECTION (raw<10%):  {:.1}% est vs {:.1}% actual (n={})",
+                     est * 100.0, act * 100.0, no_corr_stops.len());
+        }
+
+        // Survivorship: corrected < 10%
+        let surv_stops: Vec<_> = results.iter().filter(|(p, e, _)| {
+            let t = *p as f64 / n_total as f64;
+            let corr = if *e < base_recovery_target && t > 0.1 {
+                (*e * (1.0 + 6.0 * t * t)).min(1.0)
+            } else { *e };
+            corr < base_recovery_target
+        }).collect();
+        if !surv_stops.is_empty() {
+            let est: f64 = surv_stops.iter().map(|(p, e, _)| {
+                let t = *p as f64 / n_total as f64;
+                if *e < base_recovery_target && t > 0.1 {
+                    (*e * (1.0 + 6.0 * t * t)).min(1.0)
+                } else { *e }
+            }).sum::<f64>() / surv_stops.len() as f64;
+            let act = surv_stops.iter().filter(|(_, _, s)| *s).count() as f64 / surv_stops.len() as f64;
+            println!("SURVIVORSHIP (corr<10%):  {:.1}% est vs {:.1}% actual (n={})",
+                     est * 100.0, act * 100.0, surv_stops.len());
+        }
+
+        // O'Brien-Fleming: raw < adjusted threshold
+        let obf_stops: Vec<_> = results.iter().filter(|(p, e, _)| {
+            let t = *p as f64 / n_total as f64;
+            let obf_thresh = base_recovery_target * (1.0 - 0.5 * t.sqrt());
+            *e < obf_thresh
+        }).collect();
+        if !obf_stops.is_empty() {
+            let est = obf_stops.iter().map(|(_, e, _)| *e).sum::<f64>() / obf_stops.len() as f64;
+            let act = obf_stops.iter().filter(|(_, _, s)| *s).count() as f64 / obf_stops.len() as f64;
+            println!("O'BRIEN-FLEMING (raw<adj): {:.1}% est vs {:.1}% actual (n={})",
+                     est * 100.0, act * 100.0, obf_stops.len());
+        }
+
+        println!("\n================================================================");
+    }
+
+    fn quick_mc_estimate(
+        wealth: f64, n_remaining: usize,
+        n_trt: f64, events_trt: f64, n_ctrl: f64, events_ctrl: f64,
+        p_ctrl: f64, p_trt: f64, threshold: f64, burn_in: usize, ramp: usize,
+        seed: u64
+    ) -> f64 {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mc_samples = 100;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut successes = 0;
+        let current_patient = (n_trt + n_ctrl) as usize;
+
+        for _ in 0..mc_samples {
+            let mut w = wealth;
+            let mut nt = n_trt;
+            let mut et = events_trt;
+            let mut nc = n_ctrl;
+            let mut ec = events_ctrl;
+
+            for i in 0..n_remaining {
+                let patient = current_patient + i + 1;
+                let is_trt = rng.gen_bool(0.5);
+                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
+
+                if is_trt {
+                    nt += 1.0;
+                    if event { et += 1.0; }
+                } else {
+                    nc += 1.0;
+                    if event { ec += 1.0; }
+                }
+
+                let p_t = if nt > 0.0 { et / nt } else { 0.5 };
+                let p_c = if nc > 0.0 { ec / nc } else { 0.5 };
+                let delta = p_c - p_t;
+
+                let c = if patient <= burn_in { 0.0 }
+                    else if patient < burn_in + ramp { (patient - burn_in) as f64 / ramp as f64 }
+                    else { 1.0 };
+
+                let scalar = if event { 1.0 } else { -1.0 };
+                let lambda = (0.5 + 0.5 * c * delta * scalar).clamp(0.01, 0.99);
+                let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
+                w *= mult;
+
+                if w >= threshold { successes += 1; break; }
+            }
+        }
+
+        successes as f64 / mc_samples as f64
+    }
+
+    fn print_calib_stats(results: &[(usize, f64, bool)], midpoint: usize) {
+        let early: Vec<_> = results.iter().filter(|(p, _, _)| *p < midpoint).collect();
+        let late: Vec<_> = results.iter().filter(|(p, _, _)| *p >= midpoint).collect();
+
+        let total_stops = results.len();
+        let total_recover = results.iter().filter(|(_, _, s)| *s).count();
+
+        println!("    Stop recommended: {} ({:.1}%)", total_stops, 100.0 * total_stops as f64 / 1000.0);
+        println!("    Would recover:    {} ({:.1}%)", total_recover, 100.0 * total_recover as f64 / total_stops.max(1) as f64);
+
+        if !early.is_empty() {
+            let e_est = early.iter().map(|(_, e, _)| *e).sum::<f64>() / early.len() as f64;
+            let e_act = early.iter().filter(|(_, _, s)| *s).count() as f64 / early.len() as f64;
+            println!("    Early (<50%, n={}): {:.1}% est vs {:.1}% actual", early.len(), e_est * 100.0, e_act * 100.0);
+        }
+        if !late.is_empty() {
+            let l_est = late.iter().map(|(_, e, _)| *e).sum::<f64>() / late.len() as f64;
+            let l_act = late.iter().filter(|(_, _, s)| *s).count() as f64 / late.len() as f64;
+            println!("    Late (>=50%, n={}): {:.1}% est vs {:.1}% actual", late.len(), l_est * 100.0, l_act * 100.0);
+        }
     }
 }

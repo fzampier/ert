@@ -35,12 +35,15 @@ e-RTms uses stratified averaging across transition types to handle non-absorbing
 
 The FutilityMonitor is a simulation-based decision support tool (not an e-process) that estimates P(recovery)—the probability of eventually crossing the success threshold at design effect.
 
-**Survivorship bias correction:** Late stop recommendations were overconfident because trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints. The monitor applies a calibrated correction: `survivorship_correction = 1.0 + 6.0 * t²` where t = enrollment fraction.
+**Enrollment-adjusted threshold:** Late stop recommendations use a stricter threshold because trials that only cross late have been hovering near the margin—the crossing is more likely noise than signal. The threshold decreases with enrollment: `adjusted_threshold = 10% × (1 - 0.5√t)` where t = enrollment fraction.
 
-**Calibration (with correction):**
-- Early recommendations (<50% of N): ~6% est vs ~8% actual
-- Late recommendations (≥50% of N): ~4% est vs ~12% actual
-- When stop recommended, actual recovery is always well below 50%
+| Enrollment | Threshold |
+|------------|-----------|
+| 25% | 7.5% |
+| 50% | 6.5% |
+| 100% | 5.0% |
+
+When stop is recommended, actual recovery is always well below 50%.
 
 ## Quick Start
 
