@@ -624,31 +624,36 @@ The monitor estimates P(recovery), the probability that the trial will eventuall
 **How it works:**
 
 1. At regular checkpoints, uses Monte Carlo forward simulation to estimate P(recovery) at design effect
-2. Compares P(recovery) against an enrollment-adjusted threshold
-3. Reports ratio = base_threshold / P(recovery) for interpretability
+2. Applies survivorship bias correction to late, low estimates
+3. If corrected P(recovery) < recovery_target (default 10%), recommends stopping
+4. Reports ratio = recovery_target / P(recovery) for interpretability
 
-**Enrollment-Adjusted Threshold:**
+**Survivorship Bias Correction:**
 
-Trials that only cross below threshold late have been hovering near the margin—the crossing is more likely a pessimistic noise fluctuation than signal. To address this, the threshold becomes stricter as enrollment increases:
+Trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints—they weren't flagged earlier, suggesting better underlying prospects than the point-in-time MC estimate implies.
+
+The monitor corrects for this by inflating late, low estimates:
 
 ```
-adjusted_threshold = recovery_target × (1 - 0.5 × √t)
+For estimates below threshold when t > 0.1:
+    survivorship_correction = 1 + 6t²
+    corrected_estimate = raw_estimate × survivorship_correction
 ```
 
 where t = enrollment fraction (patient / N_total).
 
-| Enrollment (t) | Adjusted Threshold |
+| Enrollment (t) | Correction Factor |
 |----------------|-------------------|
-| 25% | 7.5% |
-| 50% | 6.5% |
-| 75% | 5.7% |
-| 100% | 5.0% |
+| 25% | 1.4x |
+| 50% | 2.5x |
+| 75% | 4.4x |
+| 100% | 7.0x |
 
 **Practical interpretation:**
 
-- Early recommendations use lenient threshold (easier to trigger stop)
-- Late recommendations require stronger evidence (lower P(recovery))
-- When stop is recommended, actual recovery is always well below 50%
+- Early estimates (t < 0.1) are not corrected
+- Late, low estimates are inflated to account for survivorship
+- When stop is recommended, actual recovery is well below 50%
 
 Under H0 (no effect):
 - 100% of trials recommended for stop

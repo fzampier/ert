@@ -946,16 +946,22 @@ impl FutilityMonitor {
             wealth, n_remaining, patient, n_trt, events_trt, n_ctrl, events_ctrl, p_trt_design
         );
 
-        // Enrollment-adjusted threshold: stricter threshold later in trial.
-        // Trials that only cross below threshold late have been hovering near the margin;
-        // the crossing is more likely a pessimistic noise fluctuation than signal.
-        // Threshold decreases as enrollment increases: 10% -> 7.5% -> 6.5% -> 5%
+        // Survivorship bias correction for late, low estimates.
+        // Trials reaching late checkpoints with low P(recovery) have "survived" earlier
+        // checkpoints, suggesting their actual recovery probability is higher than the
+        // point-in-time MC estimate implies.
+        // Correction: multiply by (1 + 6t²) where t = enrollment fraction.
         let t = patient as f64 / self.n_total as f64;
-        let adjusted_threshold = self.config.recovery_target * (1.0 - 0.5 * t.sqrt());
+        let corrected_recovery_prob = if recovery_prob < self.config.recovery_target && t > 0.1 {
+            let survivorship_correction = 1.0 + 6.0 * t * t;
+            (recovery_prob * survivorship_correction).min(1.0)
+        } else {
+            recovery_prob
+        };
 
-        // REPORTING: Calculate ratio using raw estimate vs base threshold
-        let ratio = if recovery_prob > 0.01 {
-            self.config.recovery_target / recovery_prob
+        // REPORTING: Calculate ratio using corrected estimate
+        let ratio = if corrected_recovery_prob > 0.01 {
+            self.config.recovery_target / corrected_recovery_prob
         } else {
             f64::INFINITY
         };
@@ -980,14 +986,14 @@ impl FutilityMonitor {
         let step = ((self.n_total as f64 * interval).ceil() as usize).max(1);
         self.next_checkpoint = patient + step;
 
-        // Build checkpoint - decision based on raw estimate vs enrollment-adjusted threshold
+        // Build checkpoint - decision based on corrected estimate vs base threshold
         let checkpoint = FutilityCheckpoint {
             patient,
             wealth,
             mode: self.mode.clone(),
             ratio,
-            recovery_prob,  // Store raw estimate
-            recommend_stop: recovery_prob < adjusted_threshold,
+            recovery_prob: corrected_recovery_prob,  // Store corrected estimate
+            recommend_stop: corrected_recovery_prob < self.config.recovery_target,
         };
 
         self.checkpoints.push(checkpoint.clone());
