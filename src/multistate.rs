@@ -174,6 +174,17 @@ struct Stratum {
 }
 
 // === PROPORTIONAL ODDS BENCHMARK ===
+//
+// We report BOTH proportional odds and Markov LRT benchmarks because they test
+// different hypotheses:
+//
+// - Proportional Odds: Tests if Day-N state distributions differ (endpoint-based)
+//   Good for comparing final outcomes but ignores trajectory information.
+//
+// - Markov LRT: Tests if transition probability matrices differ (process-based)
+//   Better match for e-RTms which analyzes transitions, not just endpoints.
+//
+// e-RTms power typically falls between these benchmarks depending on effect type.
 
 fn calculate_proportional_or(ctrl: &[f64], trt: &[f64]) -> f64 {
     let n = ctrl.len();
@@ -449,6 +460,17 @@ fn run_single_trial<R: Rng + ?Sized>(
     }
 
     // Stratified e-process: average of per-stratum e-values
+    //
+    // TYPE I ERROR CONTROL: Averaging maintains validity because:
+    // 1. Each stratum's e-process satisfies E[W_s] ≤ 1 under H0 (by construction)
+    // 2. The average of valid e-processes is itself a valid e-process:
+    //    E[avg(W_1,...,W_k)] = avg(E[W_1],...,E[W_k]) ≤ 1
+    // 3. Therefore Ville's inequality still applies: P(avg ever ≥ α⁻¹) ≤ α
+    //
+    // POWER CONSIDERATIONS: Simple averaging weights all active strata equally.
+    // For higher power, one could use inverse-variance weighting or focus on
+    // strata with more observations. The current approach is conservative but valid.
+    //
     let mut strata: Vec<Stratum> = (0..n_states).map(|_| Stratum {
         n_good_trt: 0.0, n_total_trt: 0.0,
         n_good_ctrl: 0.0, n_total_ctrl: 0.0,

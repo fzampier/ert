@@ -224,10 +224,10 @@ fn analyze(
             or_at_cross = Some(proc.current_odds_ratio());
         }
 
-        // Futility monitoring
+        // Futility monitoring - pass current process state for accurate forward simulation
         if let Some(ref mut monitor) = fut_monitor {
             if monitor.should_check(patient) {
-                monitor.check(patient, proc.wealth);
+                monitor.check(patient, proc.wealth, proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl);
             }
         }
     }

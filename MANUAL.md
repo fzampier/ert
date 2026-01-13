@@ -609,39 +609,40 @@ Early stopping tends to overestimate effects. Type M quantifies this.
 
 **IMPORTANT:** The FutilityMonitor is a simulation-based decision support tool, NOT a martingale or e-process. It does not provide anytime-valid inference.
 
-The monitor asks: "What effect size would be needed for X% probability of eventually crossing the threshold?" and compares this to the original design ARR.
+The monitor estimates P(recovery), the probability that the trial will eventually cross the success threshold assuming the true treatment effect equals the design effect.
 
 **Key Parameters:**
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Recovery target | 10% | Target recovery probability (calibrated conservatively) |
-| Stop ratio | 1.75 | Recommend stop if required ARR > 1.75x design ARR |
+| Recovery target | 10% | Recommend stop if P(recovery) < 10% |
 | Normal interval | 5% of N | Check every 5% of planned enrollment |
 | Alert interval | 1% of N | Switch to frequent checking when in danger zone |
 | Danger threshold | 0.5 | Below this e-value triggers alert mode |
-| Hysteresis | 3 | Consecutive checks above ratio before recommending stop |
+| Hysteresis | 3 | Consecutive checks above threshold to exit alert mode |
 
 **How it works:**
 
-1. At regular checkpoints, uses Monte Carlo simulation to find the ARR that would give recovery_target (default 10%) probability of crossing the threshold
-2. Computes ratio = required_ARR / design_ARR
-3. If ratio exceeds stop_ratio (default 1.75x) for hysteresis_count consecutive checks, recommends stopping
-
-**Interpretation:**
-
-| Ratio | Meaning |
-|-------|---------|
-| < 1.0 | Can likely recover with smaller-than-design effect |
-| 1.0 - 1.5 | Within design range, continue |
-| 1.5 - 2.0 | Concerning, needing larger effect than designed |
-| > 2.0 | Strong signal to consider stopping for futility |
+1. At regular checkpoints, uses Monte Carlo forward simulation to estimate P(recovery) at design effect
+2. If P(recovery) < recovery_target (default 10%), recommends stopping
+3. Reports ratio = recovery_target / P(recovery) for interpretability
 
 **Calibration (validated via simulation):**
 
-Under H1 (true 5% ARR with design 5% ARR):
-- ~8-10% of trials where stop was recommended would have succeeded
-- Trials NOT recommended for stop have ~98% success rate
+The monitor shows different calibration for early vs late checkpoints due to survivorship bias:
+
+| Timing | Estimated | Actual | Status |
+|--------|-----------|--------|--------|
+| Early (<50% of N) | ~7% | ~10-12% | Well calibrated |
+| Late (≥50% of N) | ~5% | ~20-25% | Pessimistic (survivorship bias) |
+
+**Why the difference?** Trials that first trigger a stop recommendation late have "survived" earlier checkpoints, suggesting they were performing reasonably well until recently. The point-in-time forward simulation doesn't capture this selection history, so late recommendations tend to underestimate recovery probability.
+
+**Practical interpretation:**
+
+- **Early recommendations** (before 50% enrollment): Reliable. If P(recovery) < 10%, the trial is genuinely struggling.
+- **Late recommendations** (after 50% enrollment): Interpret with caution. The trial may have better prospects than the estimate suggests.
+- **Overall**: When stop is recommended, actual recovery is always well below 50%, meaning most flagged trials would indeed fail.
 
 Under H0 (no effect):
 - 100% of trials recommended for stop

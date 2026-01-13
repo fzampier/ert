@@ -104,6 +104,9 @@ fn compute_e_survival(data: &SurvivalData, burn_in: usize, ramp: usize, lambda_m
             wealth[i] = wealth[i - 1];
         }
 
+        // Decrement risk set AFTER using it for p_null calculation.
+        // This matches log-rank semantics: patient is "at risk" at their event/censoring time,
+        // then leaves the risk set. Events update wealth; censored patients only affect risk set.
         if is_trt { risk_trt = (risk_trt - 1).max(0); }
         else { risk_ctrl = (risk_ctrl - 1).max(0); }
     }

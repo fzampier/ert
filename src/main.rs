@@ -12,6 +12,43 @@ mod compare_methods;
 mod multistate_experiment;
 
 use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+/// Detect if CSV data appears to be binary (all outcome values are 0 or 1).
+/// Returns Some(true) if binary, Some(false) if continuous, None if can't determine.
+fn detect_binary_data(path: &str) -> Option<bool> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Skip header
+    let _ = lines.next()?;
+
+    let mut seen_non_binary = false;
+    let mut count = 0;
+
+    for line in lines.take(100) {  // Check first 100 rows
+        let line = line.ok()?;
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 2 {
+            // Assume outcome is second column (treatment, outcome format)
+            let outcome = parts[1].trim();
+            if let Ok(val) = outcome.parse::<f64>() {
+                count += 1;
+                if val != 0.0 && val != 1.0 {
+                    seen_non_binary = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+    Some(!seen_non_binary)
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -37,6 +74,33 @@ fn run_cli(args: &[String]) {
             if args.len() < 2 {
                 eprintln!("Error: CSV file required");
                 eprintln!("Usage: ert analyze <file.csv> [options]");
+                return;
+            }
+            let csv_path = &args[1];
+            let opts = parse_analyze_options(&args[2..]);
+
+            // Auto-detect binary data and redirect or warn
+            if let Some(is_binary) = detect_binary_data(csv_path) {
+                if is_binary {
+                    eprintln!("Note: Data appears to be binary (all values 0 or 1).");
+                    eprintln!("      Redirecting to analyze-binary for appropriate analysis.");
+                    eprintln!("      Use explicit 'ert analyze-binary' or 'ert analyze-continuous' to override.\n");
+                    if let Err(e) = analyze_binary::run_cli(csv_path, &opts) {
+                        eprintln!("Error: {}", e);
+                    }
+                    return;
+                }
+            }
+
+            if let Err(e) = analyze_continuous::run_cli(csv_path, &opts) {
+                eprintln!("Error: {}", e);
+            }
+        }
+        "analyze-continuous" | "ac" => {
+            // Explicit continuous analysis (no auto-detection)
+            if args.len() < 2 {
+                eprintln!("Error: CSV file required");
+                eprintln!("Usage: ert analyze-continuous <file.csv> [options]");
                 return;
             }
             let csv_path = &args[1];
@@ -236,11 +300,12 @@ fn print_usage() {
     println!("e-RT: Sequential Randomization Tests");
     println!();
     println!("USAGE:");
-    println!("  ert                                Interactive mode");
-    println!("  ert analyze <file.csv>             Analyze continuous trial data");
-    println!("  ert analyze-binary <file.csv>      Analyze binary trial data");
-    println!("  ert analyze-survival <file.csv>    Analyze survival trial data");
-    println!("  ert analyze-multistate <file.csv>  Analyze multi-state trial data");
+    println!("  ert                                   Interactive mode");
+    println!("  ert analyze <file.csv>                Auto-detect and analyze trial data");
+    println!("  ert analyze-continuous <file.csv>     Analyze continuous trial data (e-RTo/c)");
+    println!("  ert analyze-binary <file.csv>         Analyze binary trial data (e-RT)");
+    println!("  ert analyze-survival <file.csv>       Analyze survival trial data (e-RTs)");
+    println!("  ert analyze-multistate <file.csv>     Analyze multi-state trial data (e-RTms)");
     println!();
     println!("OPTIONS:");
     println!("  -m, --method <rto|rtc>   Method (default: rtc)");

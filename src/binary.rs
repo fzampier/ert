@@ -4,6 +4,7 @@ use rand::RngCore;
 use rand::Rng;
 use std::io::{self, Write};
 use std::fs::File;
+use std::time::Instant;
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
@@ -21,6 +22,8 @@ struct Trial {
     z_significant: bool,
     futility_ever_recommended: bool,  // Did FutilityMonitor ever recommend stop?
     futility_worst_ratio: Option<f64>, // Worst ratio observed
+    futility_first_stop_prob: Option<f64>, // P(recovery) at first stop recommendation
+    futility_first_stop_patient: Option<usize>, // Patient number at first stop recommendation
 }
 
 pub fn run() {
@@ -58,14 +61,17 @@ pub fn run() {
     let run_futility = get_bool("Enable futility monitoring?");
     let futility_config = if run_futility {
         println!("\n--- Futility Config (simulation-based, NOT martingale) ---");
+        let use_fast = get_bool("Use fast mode? (quicker but less precise)");
         println!("Recovery target: probability of recovery to recommend stop");
         let recovery_target: f64 = get_input("Recovery target (default 0.10): ");
         println!("Stop ratio: recommend stop if required ARR > ratio * design ARR");
         let stop_ratio: f64 = get_input("Stop ratio (default 1.75): ");
+
+        let base_config = if use_fast { FutilityConfig::fast() } else { FutilityConfig::default() };
         Some(FutilityConfig {
             recovery_target: if recovery_target > 0.0 { recovery_target } else { 0.10 },
             stop_ratio: if stop_ratio > 0.0 { stop_ratio } else { 1.75 },
-            ..FutilityConfig::default()
+            ..base_config
         })
     } else {
         None
@@ -100,9 +106,7 @@ pub fn run() {
     println!("{:.2}%", type1);
 
     // === PHASE 2: POWER + FUTILITY ===
-    print!("Phase 2: Power");
-    if run_futility { print!(" + Futility"); }
-    print!("... ");
+    println!("Phase 2: Power{}", if run_futility { " + Futility (this may take a while...)" } else { "" });
     io::stdout().flush().unwrap();
 
     let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
@@ -115,8 +119,20 @@ pub fn run() {
     let n_points = n_patients / step + 1;
     let mut all_wealth_at_step: Vec<Vec<f64>> = vec![Vec::with_capacity(n_sims); n_points];
 
+    let start_time = Instant::now();
+    let progress_interval = if run_futility { 10 } else { 50 };  // More frequent updates when slow
+
     for sim in 0..n_sims {
-        if sim % (n_sims / 20).max(1) == 0 { print!("."); io::stdout().flush().unwrap(); }
+        // Progress bar with ETA
+        if sim > 0 && sim % progress_interval == 0 {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let rate = sim as f64 / elapsed;
+            let remaining = (n_sims - sim) as f64 / rate;
+            let pct = sim as f64 / n_sims as f64 * 100.0;
+            print!("\r  [{:>5.1}%] {}/{} ({:.0}s elapsed, ~{:.0}s remaining)     ",
+                   pct, sim, n_sims, elapsed, remaining);
+            io::stdout().flush().unwrap();
+        }
 
         let mut proc = BinaryERTProcess::new(burn_in, ramp);
         let mut agn = AgnosticERT::new(burn_in, ramp, threshold);
@@ -150,10 +166,10 @@ pub fn run() {
                 if agn.observe(sig) { agn_stopped = true; agn_stops.push(i); }
             }
 
-            // Futility monitoring
+            // Futility monitoring - pass current process state for accurate forward simulation
             if let Some(ref mut monitor) = fut_monitor {
                 if monitor.should_check(i) {
-                    monitor.check(i, proc.wealth);
+                    monitor.check(i, proc.wealth, proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl);
                 }
             }
 
@@ -180,10 +196,11 @@ pub fn run() {
         };
 
         // Extract futility results
-        let (fut_recommended, fut_ratio) = if let Some(monitor) = fut_monitor {
-            (monitor.ever_recommended_stop(), monitor.worst_ratio())
+        let (fut_recommended, fut_ratio, fut_first_prob, fut_first_patient) = if let Some(monitor) = fut_monitor {
+            (monitor.ever_recommended_stop(), monitor.worst_ratio(),
+             monitor.first_stop_recovery_prob(), monitor.first_stop_patient())
         } else {
-            (false, None)
+            (false, None, None, None)
         };
 
         trials.push(Trial {
@@ -194,9 +211,14 @@ pub fn run() {
             z_significant: z_sig,
             futility_ever_recommended: fut_recommended,
             futility_worst_ratio: fut_ratio,
+            futility_first_stop_prob: fut_first_prob,
+            futility_first_stop_patient: fut_first_patient,
         });
     }
-    println!(" done");
+    // Clear progress line and show completion
+    let total_time = start_time.elapsed().as_secs_f64();
+    print!("\r  [100.0%] {}/{} complete ({:.1}s total)                    \n", n_sims, n_sims, total_time);
+    io::stdout().flush().unwrap();
 
     // === STATISTICS ===
     let successes: Vec<&Trial> = trials.iter().filter(|t| t.stop_n.is_some()).collect();
@@ -234,11 +256,13 @@ pub fn run() {
     // Futility monitor stats
     let fut_recommended_count = trials.iter().filter(|t| t.futility_ever_recommended).count();
     let fut_ratios: Vec<f64> = trials.iter().filter_map(|t| t.futility_worst_ratio).collect();
-    let fut_med_ratio = if !fut_ratios.is_empty() {
-        let mut sorted = fut_ratios.clone();
+    // Filter finite values for median calculation
+    let finite_ratios: Vec<f64> = fut_ratios.iter().filter(|r| r.is_finite()).copied().collect();
+    let fut_med_ratio = if !finite_ratios.is_empty() {
+        let mut sorted = finite_ratios.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         sorted[sorted.len() / 2]
-    } else { 0.0 };
+    } else { f64::NAN };
     // Recovery rate: of those where stop was recommended, how many would have succeeded?
     let fut_would_recover = trials.iter()
         .filter(|t| t.futility_ever_recommended && t.stop_n.is_some())
@@ -246,6 +270,50 @@ pub fn run() {
     let fut_recovery_rate = if fut_recommended_count > 0 {
         fut_would_recover as f64 / fut_recommended_count as f64 * 100.0
     } else { 0.0 };
+    // Calibration: average estimated P(recovery) at first stop vs actual recovery rate
+    // Note: first_stop_prob is only set when stop was recommended, so these are the same trials
+    let fut_probs: Vec<f64> = trials.iter()
+        .filter_map(|t| t.futility_first_stop_prob)
+        .collect();
+    let fut_avg_prob = if !fut_probs.is_empty() {
+        fut_probs.iter().sum::<f64>() / fut_probs.len() as f64 * 100.0
+    } else { 0.0 };
+    // Count trials that had first stop recommendation (= those with fut_first_stop_prob)
+    // and actually recovered - this is the TRUE calibration test
+    let fut_first_stop_recovered = trials.iter()
+        .filter(|t| t.futility_first_stop_prob.is_some() && t.stop_n.is_some())
+        .count();
+    let fut_first_stop_total = fut_probs.len();
+    let fut_actual_recovery = if fut_first_stop_total > 0 {
+        fut_first_stop_recovered as f64 / fut_first_stop_total as f64 * 100.0
+    } else { 0.0 };
+    // Average patient number at first stop recommendation
+    let fut_first_patients: Vec<usize> = trials.iter()
+        .filter_map(|t| t.futility_first_stop_patient)
+        .collect();
+    let fut_avg_first_patient = if !fut_first_patients.is_empty() {
+        fut_first_patients.iter().sum::<usize>() as f64 / fut_first_patients.len() as f64
+    } else { 0.0 };
+    // Break down recovery rate by first-stop timing
+    let midpoint = n_patients / 2;
+    let early_stops: Vec<_> = trials.iter()
+        .filter(|t| t.futility_first_stop_patient.map_or(false, |p| p < midpoint))
+        .collect();
+    let late_stops: Vec<_> = trials.iter()
+        .filter(|t| t.futility_first_stop_patient.map_or(false, |p| p >= midpoint))
+        .collect();
+    let early_recovery = if !early_stops.is_empty() {
+        early_stops.iter().filter(|t| t.stop_n.is_some()).count() as f64 / early_stops.len() as f64
+    } else { 0.0 };
+    let late_recovery = if !late_stops.is_empty() {
+        late_stops.iter().filter(|t| t.stop_n.is_some()).count() as f64 / late_stops.len() as f64
+    } else { 0.0 };
+    let early_avg_prob: f64 = early_stops.iter()
+        .filter_map(|t| t.futility_first_stop_prob)
+        .sum::<f64>() / early_stops.len().max(1) as f64;
+    let late_avg_prob: f64 = late_stops.iter()
+        .filter_map(|t| t.futility_first_stop_prob)
+        .sum::<f64>() / late_stops.len().max(1) as f64;
 
     // === CONSOLE OUTPUT ===
     let mut out = String::with_capacity(2048);
@@ -259,8 +327,9 @@ pub fn run() {
     out.push_str(&format!("Simulations: {}\n", n_sims));
     out.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, 1.0/threshold));
     if let Some(ref cfg) = futility_config {
-        out.push_str(&format!("Futility:    recovery={:.0}% ratio={:.2}x\n",
-            cfg.recovery_target * 100.0, cfg.stop_ratio));
+        let mode = if cfg.mc_samples <= 50 { " (fast)" } else { "" };
+        out.push_str(&format!("Futility:    recovery={:.0}% ratio={:.2}x{}\n",
+            cfg.recovery_target * 100.0, cfg.stop_ratio, mode));
     } else {
         out.push_str("Futility:    disabled\n");
     }
@@ -292,7 +361,17 @@ pub fn run() {
             fut_recommended_count, fut_recommended_count as f64 / n_sims as f64 * 100.0));
         out.push_str(&format!("Would recover:     {} ({:.1}%)\n",
             fut_would_recover, fut_recovery_rate));
-        out.push_str(&format!("Median ratio:      {:.2}x\n", fut_med_ratio));
+        out.push_str(&format!("Calibration:       {:.1}% estimated vs {:.1}% actual\n",
+            fut_avg_prob, fut_actual_recovery));
+        out.push_str(&format!("Avg 1st stop at:   patient {:.0} ({:.0}% of N)\n",
+            fut_avg_first_patient, fut_avg_first_patient / n_patients as f64 * 100.0));
+        // Early vs late breakdown
+        if !early_stops.is_empty() && !late_stops.is_empty() {
+            out.push_str(&format!("  Early (<{} n={}): {:.1}% est vs {:.1}% actual\n",
+                midpoint, early_stops.len(), early_avg_prob * 100.0, early_recovery * 100.0));
+            out.push_str(&format!("  Late (>={} n={}): {:.1}% est vs {:.1}% actual\n",
+                midpoint, late_stops.len(), late_avg_prob * 100.0, late_recovery * 100.0));
+        }
     }
 
     print!("\n{}", out);
@@ -368,20 +447,33 @@ fn build_report(
         g_th.push(th); g_z.push(pct_z); g_e.push(pct_e);
     }
 
-    // Futility ratio ECDF
+    // Futility ratio ECDF - filter out infinity values for plotting
     let (fut_div, fut_plot) = if run_futility && !fut_ratios.is_empty() {
-        let mut s = fut_ratios.to_vec();
-        s.sort_by(|a,b| a.partial_cmp(b).unwrap());
-        let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64).collect();
-        (
-            "<h3>Recovery Difficulty (Ratio Distribution)</h3><div id=\"p5\" style=\"height:280px\"></div>".into(),
-            format!("Plotly.newPlot('p5',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],{{xaxis:{{title:'Required ARR / Design ARR'}},yaxis:{{title:'Cumulative'}},shapes:[{{type:'line',x0:1,x1:1,y0:0,y1:1,line:{{color:'green',dash:'dash'}}}},{{type:'line',x0:1.75,x1:1.75,y0:0,y1:1,line:{{color:'red',dash:'dot'}}}}]}});", s, y)
-        )
+        // Filter out infinite values and cap at 10x for plotting
+        let mut s: Vec<f64> = fut_ratios.iter()
+            .filter(|r| r.is_finite())
+            .map(|r| r.min(10.0))
+            .collect();
+        if !s.is_empty() {
+            s.sort_by(|a,b| a.partial_cmp(b).unwrap());
+            let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64).collect();
+            (
+                "<h3>Recovery Difficulty (Ratio Distribution)</h3><div id=\"p5\" style=\"height:280px\"></div>".into(),
+                format!("Plotly.newPlot('p5',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],{{xaxis:{{title:'Recovery Target / P(recovery)',range:[0,10]}},yaxis:{{title:'Cumulative'}},shapes:[{{type:'line',x0:1,x1:1,y0:0,y1:1,line:{{color:'green',dash:'dash'}}}},{{type:'line',x0:2,x1:2,y0:0,y1:1,line:{{color:'orange',dash:'dot'}}}}]}});", s, y)
+            )
+        } else {
+            (String::new(), String::new())
+        }
     } else { (String::new(), String::new()) };
 
     let fut_txt = if run_futility && fut_count > 0 {
-        format!("Futility: {} triggered ({:.1}%), median ratio {:.2}x\n",
-            fut_count, fut_count as f64 / n_sims as f64 * 100.0, fut_ratio)
+        let ratio_str = if fut_ratio.is_nan() || fut_ratio.is_infinite() {
+            "N/A".to_string()
+        } else {
+            format!("{:.2}x", fut_ratio)
+        };
+        format!("Futility: {} triggered ({:.1}%), median ratio {}\n",
+            fut_count, fut_count as f64 / n_sims as f64 * 100.0, ratio_str)
     } else { String::new() };
 
     format!(r#"<!DOCTYPE html>

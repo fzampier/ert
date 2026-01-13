@@ -1,4 +1,18 @@
 //! Compare e-RTo vs e-RTc methods under identical conditions
+//!
+//! PURPOSE: This module runs head-to-head comparisons of:
+//! - e-RTo (bounded/ordinal): Linear scoring for outcomes with known min/max (e.g., VFD 0-28)
+//! - e-RTc (unbounded/continuous): MAD-based for general continuous outcomes
+//!
+//! Key features:
+//! - Runs BOTH methods on IDENTICAL simulated data for fair comparison
+//! - Compares Type I error, power, stopping time, and Type M error
+//! - Head-to-head: tracks which method stops first on each trial
+//! - Generates HTML report with trajectory visualizations
+//!
+//! Use case: When choosing between e-RTo and e-RTc for a bounded continuous
+//! outcome like VFD, this comparison helps decide which is more appropriate
+//! given the specific effect size and bounds.
 
 use rand::Rng;
 use rand::SeedableRng;

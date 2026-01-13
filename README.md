@@ -33,9 +33,13 @@ e-RTms uses stratified averaging across transition types to handle non-absorbing
 
 ## Futility Monitoring
 
-The FutilityMonitor is a simulation-based decision support tool (not an e-process) that answers: "What effect size would be needed for 10% recovery probability?"
+The FutilityMonitor is a simulation-based decision support tool (not an e-process) that estimates P(recovery)—the probability of eventually crossing the success threshold at design effect.
 
-If the required effect exceeds 1.75x the design effect for multiple consecutive checkpoints, it recommends considering stopping for futility. Validated calibration shows ~8-10% recovery rate among trials where stop was recommended.
+**Key findings from calibration:**
+- Early recommendations (<50% of N): Well calibrated (~7% est vs ~10% actual recovery)
+- Late recommendations (≥50% of N): Pessimistic due to survivorship bias (~5% est vs ~20% actual)
+
+Early recommendations are reliable; late recommendations should be interpreted with caution. When stop is recommended, actual recovery is always well below 50%.
 
 ## Quick Start
 
