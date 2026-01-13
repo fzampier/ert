@@ -627,22 +627,32 @@ The monitor estimates P(recovery), the probability that the trial will eventuall
 2. If P(recovery) < recovery_target (default 10%), recommends stopping
 3. Reports ratio = recovery_target / P(recovery) for interpretability
 
-**Calibration (validated via simulation):**
+**Survivorship Bias Correction:**
 
-The monitor shows different calibration for early vs late checkpoints due to survivorship bias:
+Trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints—they weren't flagged earlier, suggesting better underlying prospects than the current estimate implies.
+
+The monitor corrects for this by inflating late, low estimates:
+
+```
+For trials with recovery_prob < threshold and t > 0.1:
+    survivorship_correction = 1.0 + 6.0 * t²
+    corrected_prob = recovery_prob * survivorship_correction
+```
+
+where t = enrollment fraction (patient / N_total).
+
+**Calibration (with correction):**
 
 | Timing | Estimated | Actual | Status |
 |--------|-----------|--------|--------|
-| Early (<50% of N) | ~7% | ~10-12% | Well calibrated |
-| Late (≥50% of N) | ~5% | ~20-25% | Pessimistic (survivorship bias) |
-
-**Why the difference?** Trials that first trigger a stop recommendation late have "survived" earlier checkpoints, suggesting they were performing reasonably well until recently. The point-in-time forward simulation doesn't capture this selection history, so late recommendations tend to underestimate recovery probability.
+| Early (<50% of N) | ~6% | ~8% | Well calibrated |
+| Late (≥50% of N) | ~4% | ~12% | Improved (was ~20-25% without correction) |
 
 **Practical interpretation:**
 
-- **Early recommendations** (before 50% enrollment): Reliable. If P(recovery) < 10%, the trial is genuinely struggling.
-- **Late recommendations** (after 50% enrollment): Interpret with caution. The trial may have better prospects than the estimate suggests.
-- **Overall**: When stop is recommended, actual recovery is always well below 50%, meaning most flagged trials would indeed fail.
+- When stop is recommended, actual recovery is always well below 50%
+- Early recommendations remain reliable
+- Late recommendations improved but still somewhat pessimistic due to residual survivorship bias
 
 Under H0 (no effect):
 - 100% of trials recommended for stop
