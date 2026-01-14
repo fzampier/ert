@@ -844,7 +844,8 @@ impl CalibrationTable {
     }
 
     /// Lookup corrected estimate with bilinear interpolation
-    pub fn lookup(&self, t: f64, raw_estimate: f64) -> f64 {
+    /// Falls back to shrinkage correction when bins have sparse data
+    pub fn lookup(&self, t: f64, raw_estimate: f64, threshold: f64) -> f64 {
         // Get fractional bin indices
         let t_frac = (t * self.t_bins as f64).max(0.0);
         let est_frac = (raw_estimate * self.est_bins as f64 / 0.2).max(0.0);
@@ -857,10 +858,17 @@ impl CalibrationTable {
         let t_w = t_frac - t_lo as f64;
         let est_w = est_frac - est_lo as f64;
 
-        // Get actual rates for 4 corners, falling back to raw estimate if no data
+        // Get actual rates for 4 corners
+        // Sparse bins use shrinkage fallback instead of raw estimate
         let get_rate = |ti: usize, ei: usize| -> f64 {
             let (sum, count) = self.grid[ti][ei];
-            if count >= 5 { sum / count as f64 } else { raw_estimate }
+            if count >= 5 {
+                sum / count as f64
+            } else {
+                // Shrink toward threshold: more pull-back when late (high t)
+                let t_approx = (ti as f64 + 0.5) / self.t_bins as f64;
+                raw_estimate + (threshold - raw_estimate) * t_approx.sqrt()
+            }
         };
 
         let r00 = get_rate(t_lo, est_lo);
@@ -1148,12 +1156,12 @@ impl FutilityMonitor {
 
         // Survivorship bias correction using calibration table or fallback formula
         let t = patient as f64 / self.n_total as f64;
+        let threshold = self.config.recovery_target;
         let corrected_recovery_prob = if let Some(ref cal) = self.calibration {
-            // Use calibration table lookup
-            cal.lookup(t, raw_recovery_prob)
-        } else if raw_recovery_prob < self.config.recovery_target && t > 0.1 {
+            // Use calibration table lookup (with shrinkage fallback for sparse bins)
+            cal.lookup(t, raw_recovery_prob, threshold)
+        } else if raw_recovery_prob < threshold && t > 0.1 {
             // Fallback: shrink toward threshold (no calibration table)
-            let threshold = self.config.recovery_target;
             raw_recovery_prob + (threshold - raw_recovery_prob) * t.sqrt()
         } else {
             raw_recovery_prob
