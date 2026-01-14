@@ -16,7 +16,7 @@ When wealth exceeds a threshold (e.g., 20 for alpha=0.05), we reject the null. V
 
 **[Read the preprint](https://arxiv.org/abs/2512.04366)**
 
-The preprint has R code from a previous implementation. As of January 07 2026, the Rust implementation has some advantages not implemented in the R code.
+The preprint has R code from a previous implementation. The Rust implementation has additional features not in the R code (e.g., futility monitoring with calibration).
 R code remains valid.
 
 ## Methods
@@ -35,7 +35,7 @@ e-RTms uses stratified averaging across transition types to handle non-absorbing
 
 The FutilityMonitor is a simulation-based decision support tool (not an e-process) that estimates P(recovery)—the probability of eventually crossing the success threshold at design effect.
 
-**Survivorship bias correction:** Late estimates are inflated because trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints—suggesting better prospects than the point-in-time estimate implies. Correction: `corrected = estimate × (1 + 6t²)` where t = enrollment fraction.
+**Survivorship bias correction:** Late estimates are optimistic because trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints. Uses data-driven calibration table (5x5 bins for t × estimate) with shrinkage fallback: `corrected = estimate + (threshold - estimate) × √t`.
 
 When stop is recommended, actual recovery is well below 50%.
 

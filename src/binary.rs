@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
     calculate_n_binary, BinaryERTProcess, z_test_power_binary,
-    FutilityMonitor, FutilityConfig,
+    FutilityMonitor, FutilityConfig, CalibrationTable,
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
@@ -105,6 +105,23 @@ pub fn run() {
     let type1 = null_rej as f64 / n_sims as f64 * 100.0;
     println!("{:.2}%", type1);
 
+    // === PHASE 1.5: BUILD CALIBRATION TABLE (if futility enabled) ===
+    let calibration_table = if run_futility {
+        print!("Building calibration table (2000 sims)... ");
+        io::stdout().flush().unwrap();
+        let cal_seed = match seed { Some(s) => s + 999999, None => 42 };
+        let table = CalibrationTable::build(
+            p_ctrl, p_trt, n_patients, threshold, burn_in, ramp,
+            2000,  // calibration simulations - need enough for 100 bins
+            cal_seed,
+        );
+        println!("done");
+        table.print_summary();
+        Some(table)
+    } else {
+        None
+    };
+
     // === PHASE 2: POWER + FUTILITY ===
     println!("Phase 2: Power{}", if run_futility { " + Futility (this may take a while...)" } else { "" });
     io::stdout().flush().unwrap();
@@ -141,9 +158,13 @@ pub fn run() {
         let mut min_w = 1.0f64;
         let mut traj = if sim < 30 { Vec::with_capacity(n_patients / step + 1) } else { Vec::new() };
 
-        // Create futility monitor for this trial if enabled
+        // Create futility monitor for this trial if enabled (with calibration table)
         let mut fut_monitor = futility_config.as_ref().map(|cfg| {
-            FutilityMonitor::new(cfg.clone(), design_arr, p_ctrl, n_patients, threshold, burn_in, ramp)
+            let mut monitor = FutilityMonitor::new(cfg.clone(), p_ctrl, p_trt, n_patients, threshold, burn_in, ramp);
+            if let Some(ref cal) = calibration_table {
+                monitor.set_calibration(cal.clone());
+            }
+            monitor
         });
 
         if sim < 30 { traj.push(1.0); }
@@ -234,7 +255,6 @@ pub fn run() {
     } else { (0.0, 0.0, 0.0, 0.0) };
 
     let agn_power = agn_success as f64 / n_sims as f64 * 100.0;
-    let _agn_avg = if !agn_stops.is_empty() { agn_stops.iter().sum::<usize>() as f64 / agn_stops.len() as f64 } else { 0.0 };
     let z_power = z_test_power_binary(p_ctrl, p_trt, n_patients, 1.0 / threshold) * 100.0;
 
     // Futility grid (single pass)
@@ -260,7 +280,7 @@ pub fn run() {
     let finite_ratios: Vec<f64> = fut_ratios.iter().filter(|r| r.is_finite()).copied().collect();
     let fut_med_ratio = if !finite_ratios.is_empty() {
         let mut sorted = finite_ratios.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
     } else { f64::NAN };
     // Recovery rate: of those where stop was recommended, how many would have succeeded?
@@ -386,7 +406,7 @@ pub fn run() {
 
     for (idx, vals) in all_wealth_at_step.iter_mut().enumerate() {
         if vals.is_empty() { continue; }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = vals.len();
         x_pts.push(idx * step);
         y_lo.push(vals[(n as f64 * 0.025) as usize]);
@@ -428,7 +448,7 @@ fn build_report(
     // Stop ECDF
     let (stop_x, stop_y) = if !stops.is_empty() {
         let mut s = stops.to_vec();
-        s.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        s.sort_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64 * 100.0).collect();
         (format!("{:?}", s), format!("{:?}", y))
     } else { ("[]".into(), "[]".into()) };
@@ -455,7 +475,7 @@ fn build_report(
             .map(|r| r.min(10.0))
             .collect();
         if !s.is_empty() {
-            s.sort_by(|a,b| a.partial_cmp(b).unwrap());
+            s.sort_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64).collect();
             (
                 "<h3>Recovery Difficulty (Ratio Distribution)</h3><div id=\"p5\" style=\"height:280px\"></div>".into(),

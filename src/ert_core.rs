@@ -108,7 +108,7 @@ pub fn median(data: &[f64]) -> f64 {
         return 0.0;
     }
     let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
     if n % 2 == 0 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
@@ -408,10 +408,13 @@ impl LinearERTProcess {
         else { self.n_ctrl += 1.0; self.sum_ctrl += outcome; }
 
         if i > self.burn_in {
-            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
-            let x = (outcome - self.min_val) / (self.max_val - self.min_val);
-            let scalar = 2.0 * x - 1.0;
             let range = self.max_val - self.min_val;
+            if range.abs() < 1e-10 {
+                return; // Cannot compute without valid range
+            }
+            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
+            let x = (outcome - self.min_val) / range;
+            let scalar = 2.0 * x - 1.0;
             let delta_norm = delta_hat / range;
             let lambda = (0.5 + 0.5 * c_i * delta_norm * scalar).clamp(0.001, 0.999);
             let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
@@ -804,6 +807,160 @@ pub fn t_test_power_continuous(effect: f64, sd: f64, n_total: usize, alpha: f64)
 // always well below 50%, meaning most flagged trials would indeed fail.
 //
 
+/// Calibration table for survivorship bias correction.
+/// Maps (enrollment_fraction, raw_estimate) → actual_recovery_rate.
+/// Built from simulation data, no arbitrary functional form.
+#[derive(Clone, Debug)]
+pub struct CalibrationTable {
+    /// Number of bins for enrollment fraction t
+    t_bins: usize,
+    /// Number of bins for raw estimate
+    est_bins: usize,
+    /// Grid: [t_bin][est_bin] = (sum_actual, count)
+    grid: Vec<Vec<(f64, usize)>>,
+}
+
+impl CalibrationTable {
+    /// Create empty calibration table
+    pub fn new(t_bins: usize, est_bins: usize) -> Self {
+        let grid = vec![vec![(0.0, 0); est_bins]; t_bins];
+        CalibrationTable { t_bins, est_bins, grid }
+    }
+
+    /// Default table: 5 bins for t, 5 bins for estimate (0 to 0.2)
+    /// Coarser bins = more data per bin = better calibration at low estimates
+    pub fn default_bins() -> Self {
+        Self::new(5, 5)
+    }
+
+    /// Add observation: at enrollment t with raw estimate, did trial recover?
+    pub fn add(&mut self, t: f64, raw_estimate: f64, recovered: bool) {
+        let t_idx = ((t * self.t_bins as f64).floor() as usize).min(self.t_bins - 1);
+        let est_idx = ((raw_estimate * self.est_bins as f64 / 0.2).floor() as usize)
+            .min(self.est_bins - 1);
+
+        self.grid[t_idx][est_idx].0 += if recovered { 1.0 } else { 0.0 };
+        self.grid[t_idx][est_idx].1 += 1;
+    }
+
+    /// Lookup corrected estimate with bilinear interpolation
+    pub fn lookup(&self, t: f64, raw_estimate: f64) -> f64 {
+        // Get fractional bin indices
+        let t_frac = (t * self.t_bins as f64).max(0.0);
+        let est_frac = (raw_estimate * self.est_bins as f64 / 0.2).max(0.0);
+
+        let t_lo = (t_frac.floor() as usize).min(self.t_bins - 1);
+        let t_hi = (t_lo + 1).min(self.t_bins - 1);
+        let est_lo = (est_frac.floor() as usize).min(self.est_bins - 1);
+        let est_hi = (est_lo + 1).min(self.est_bins - 1);
+
+        let t_w = t_frac - t_lo as f64;
+        let est_w = est_frac - est_lo as f64;
+
+        // Get actual rates for 4 corners, falling back to raw estimate if no data
+        let get_rate = |ti: usize, ei: usize| -> f64 {
+            let (sum, count) = self.grid[ti][ei];
+            if count >= 5 { sum / count as f64 } else { raw_estimate }
+        };
+
+        let r00 = get_rate(t_lo, est_lo);
+        let r01 = get_rate(t_lo, est_hi);
+        let r10 = get_rate(t_hi, est_lo);
+        let r11 = get_rate(t_hi, est_hi);
+
+        // Bilinear interpolation
+        let r0 = r00 * (1.0 - est_w) + r01 * est_w;
+        let r1 = r10 * (1.0 - est_w) + r11 * est_w;
+        r0 * (1.0 - t_w) + r1 * t_w
+    }
+
+    /// Build calibration table from simulations.
+    /// Records only FIRST checkpoint where estimate < threshold (survivorship bias scenario).
+    pub fn build(
+        p_ctrl: f64,
+        p_trt: f64,
+        n_total: usize,
+        threshold: f64,
+        burn_in: usize,
+        ramp: usize,
+        n_sims: usize,
+        seed: u64,
+    ) -> Self {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+
+        let mut table = Self::default_bins();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let config = FutilityConfig { mc_samples: 100, ..Default::default() };
+        let recovery_target = config.recovery_target;
+
+        for _ in 0..n_sims {
+            let mut proc = BinaryERTProcess::new(burn_in, ramp);
+            let mut first_low_checkpoint: Option<(f64, f64)> = None;
+
+            // Create monitor without calibration (raw estimates)
+            let mut monitor = FutilityMonitor::new_uncalibrated(
+                config.clone(), p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
+            );
+
+            for patient in 1..=n_total {
+                let is_trt = rng.gen_bool(0.5);
+                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
+                proc.update(patient, if event { 1.0 } else { 0.0 }, is_trt);
+
+                if let Some(cp) = monitor.check(
+                    patient, proc.wealth,
+                    proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl
+                ) {
+                    // Only record FIRST checkpoint where estimate is low
+                    if first_low_checkpoint.is_none() && cp.recovery_prob < recovery_target * 1.5 {
+                        let t = patient as f64 / n_total as f64;
+                        first_low_checkpoint = Some((t, cp.recovery_prob));
+                    }
+                }
+
+                if proc.wealth >= threshold { break; }
+            }
+
+            let recovered = proc.wealth >= threshold;
+
+            // Add only the first low checkpoint (captures survivorship bias)
+            if let Some((t, est)) = first_low_checkpoint {
+                table.add(t, est, recovered);
+            }
+        }
+
+        table
+    }
+
+    /// Print calibration table summary
+    #[allow(dead_code)]
+    pub fn print_summary(&self) {
+        println!("\nCalibration Table (actual recovery rate by t and estimate):");
+        print!("         ");
+        for e in 0..self.est_bins {
+            print!(" {:>5.0}%", (e as f64 + 0.5) * 20.0 / self.est_bins as f64);
+        }
+        println!();
+
+        for t in 0..self.t_bins {
+            print!("t={:.0}%-{:.0}%:",
+                   t as f64 * 100.0 / self.t_bins as f64,
+                   (t + 1) as f64 * 100.0 / self.t_bins as f64);
+            for e in 0..self.est_bins {
+                let (sum, count) = self.grid[t][e];
+                if count >= 5 {
+                    print!(" {:>5.1}%", 100.0 * sum / count as f64);
+                } else {
+                    print!("    -- ");
+                }
+            }
+            println!();
+        }
+    }
+}
+
 /// Checkpoint result from futility monitoring
 #[derive(Clone, Debug)]
 pub struct FutilityCheckpoint {
@@ -883,10 +1040,14 @@ pub struct FutilityMonitor {
     next_checkpoint: usize,
     consecutive_above: usize,      // Count for hysteresis
     pub checkpoints: Vec<FutilityCheckpoint>,
+
+    // Calibration table for survivorship bias correction (None = no correction)
+    calibration: Option<CalibrationTable>,
 }
 
 impl FutilityMonitor {
-    pub fn new(
+    /// Create monitor without calibration (raw estimates, for calibration table building)
+    pub fn new_uncalibrated(
         config: FutilityConfig,
         p_ctrl: f64,
         p_trt: f64,
@@ -911,7 +1072,46 @@ impl FutilityMonitor {
             next_checkpoint: first_checkpoint,
             consecutive_above: 0,
             checkpoints: Vec::new(),
+            calibration: None,
         }
+    }
+
+    /// Create monitor with calibration table for survivorship bias correction
+    #[allow(dead_code)]
+    pub fn new_with_calibration(
+        config: FutilityConfig,
+        p_ctrl: f64,
+        p_trt: f64,
+        n_total: usize,
+        threshold: f64,
+        burn_in: usize,
+        ramp: usize,
+        calibration: CalibrationTable,
+    ) -> Self {
+        let mut monitor = Self::new_uncalibrated(
+            config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
+        );
+        monitor.calibration = Some(calibration);
+        monitor
+    }
+
+    /// Create monitor (backward compatible - uses fallback correction)
+    pub fn new(
+        config: FutilityConfig,
+        p_ctrl: f64,
+        p_trt: f64,
+        n_total: usize,
+        threshold: f64,
+        burn_in: usize,
+        ramp: usize,
+    ) -> Self {
+        // Use uncalibrated for now; calibration table can be set later
+        Self::new_uncalibrated(config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp)
+    }
+
+    /// Set calibration table
+    pub fn set_calibration(&mut self, calibration: CalibrationTable) {
+        self.calibration = Some(calibration);
     }
 
     /// Check if we should evaluate futility at this patient number
@@ -942,21 +1142,21 @@ impl FutilityMonitor {
 
         // DECISION BASIS: Estimate P(recovery) assuming design effect continues
         let p_trt_design = (self.p_ctrl - self.design_arr).max(0.001);
-        let recovery_prob = self.estimate_recovery_prob(
+        let raw_recovery_prob = self.estimate_recovery_prob(
             wealth, n_remaining, patient, n_trt, events_trt, n_ctrl, events_ctrl, p_trt_design
         );
 
-        // Survivorship bias correction for late, low estimates.
-        // Trials reaching late checkpoints with low P(recovery) have "survived" earlier
-        // checkpoints, suggesting their actual recovery probability is higher than the
-        // point-in-time MC estimate implies.
-        // Correction: multiply by (1 + 6t²) where t = enrollment fraction.
+        // Survivorship bias correction using calibration table or fallback formula
         let t = patient as f64 / self.n_total as f64;
-        let corrected_recovery_prob = if recovery_prob < self.config.recovery_target && t > 0.1 {
-            let survivorship_correction = 1.0 + 6.0 * t * t;
-            (recovery_prob * survivorship_correction).min(1.0)
+        let corrected_recovery_prob = if let Some(ref cal) = self.calibration {
+            // Use calibration table lookup
+            cal.lookup(t, raw_recovery_prob)
+        } else if raw_recovery_prob < self.config.recovery_target && t > 0.1 {
+            // Fallback: shrink toward threshold (no calibration table)
+            let threshold = self.config.recovery_target;
+            raw_recovery_prob + (threshold - raw_recovery_prob) * t.sqrt()
         } else {
-            recovery_prob
+            raw_recovery_prob
         };
 
         // REPORTING: Calculate ratio using corrected estimate
@@ -1602,7 +1802,7 @@ mod tests {
             println!("  Actual recovery:  {:.1}%", actual * 100.0);
 
             // Test different corrections
-            let t_avg = early.iter().map(|(p, _, _)| *p as f64 / n_total as f64).sum::<f64>() / early.len() as f64;
+            let _t_avg = early.iter().map(|(p, _, _)| *p as f64 / n_total as f64).sum::<f64>() / early.len() as f64;
 
             // Survivorship: est *= (1 + 6*t²)
             let surv_est: f64 = early.iter().map(|(p, e, _)| {
@@ -1717,6 +1917,7 @@ mod tests {
         println!("\n================================================================");
     }
 
+    #[allow(dead_code)]
     fn quick_mc_estimate(
         wealth: f64, n_remaining: usize,
         n_trt: f64, events_trt: f64, n_ctrl: f64, events_ctrl: f64,
@@ -1772,6 +1973,7 @@ mod tests {
         successes as f64 / mc_samples as f64
     }
 
+    #[allow(dead_code)]
     fn print_calib_stats(results: &[(usize, f64, bool)], midpoint: usize) {
         let early: Vec<_> = results.iter().filter(|(p, _, _)| *p < midpoint).collect();
         let late: Vec<_> = results.iter().filter(|(p, _, _)| *p >= midpoint).collect();
