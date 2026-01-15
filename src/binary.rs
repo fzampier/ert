@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_optional_input,
     calculate_n_binary, BinaryERTProcess, z_test_power_binary,
-    FutilityMonitor, FutilityConfig, CalibrationTable,
+    FutilityMonitor, FutilityConfig,
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
@@ -60,18 +60,13 @@ pub fn run() {
     // Futility monitoring configuration
     let run_futility = get_bool("Enable futility monitoring?");
     let futility_config = if run_futility {
-        println!("\n--- Futility Config (simulation-based, NOT martingale) ---");
-        let use_fast = get_bool("Use fast mode? (quicker but less precise)");
-        println!("Recovery target: probability of recovery to recommend stop");
+        println!("\n--- Futility Config (analytical Bayesian, NOT martingale) ---");
+        println!("Recovery target: P(recovery) below which to recommend stop");
         let recovery_target: f64 = get_input("Recovery target (default 0.10): ");
-        println!("Stop ratio: recommend stop if required ARR > ratio * design ARR");
-        let stop_ratio: f64 = get_input("Stop ratio (default 1.75): ");
 
-        let base_config = if use_fast { FutilityConfig::fast() } else { FutilityConfig::default() };
         Some(FutilityConfig {
             recovery_target: if recovery_target > 0.0 { recovery_target } else { 0.10 },
-            stop_ratio: if stop_ratio > 0.0 { stop_ratio } else { 1.75 },
-            ..base_config
+            ..Default::default()
         })
     } else {
         None
@@ -104,23 +99,6 @@ pub fn run() {
     }
     let type1 = null_rej as f64 / n_sims as f64 * 100.0;
     println!("{:.2}%", type1);
-
-    // === PHASE 1.5: BUILD CALIBRATION TABLE (if futility enabled) ===
-    let calibration_table = if run_futility {
-        print!("Building calibration table (2000 sims)... ");
-        io::stdout().flush().unwrap();
-        let cal_seed = match seed { Some(s) => s + 999999, None => 42 };
-        let table = CalibrationTable::build(
-            p_ctrl, p_trt, n_patients, threshold, burn_in, ramp,
-            2000,  // calibration simulations - need enough for 100 bins
-            cal_seed,
-        );
-        println!("done");
-        table.print_summary();
-        Some(table)
-    } else {
-        None
-    };
 
     // === PHASE 2: POWER + FUTILITY ===
     println!("Phase 2: Power{}", if run_futility { " + Futility (this may take a while...)" } else { "" });
@@ -158,13 +136,9 @@ pub fn run() {
         let mut min_w = 1.0f64;
         let mut traj = if sim < 30 { Vec::with_capacity(n_patients / step + 1) } else { Vec::new() };
 
-        // Create futility monitor for this trial if enabled (with calibration table)
+        // Create futility monitor for this trial if enabled
         let mut fut_monitor = futility_config.as_ref().map(|cfg| {
-            let mut monitor = FutilityMonitor::new(cfg.clone(), p_ctrl, p_trt, n_patients, threshold, burn_in, ramp);
-            if let Some(ref cal) = calibration_table {
-                monitor.set_calibration(cal.clone());
-            }
-            monitor
+            FutilityMonitor::new(cfg.clone(), p_ctrl, p_trt, n_patients, threshold, burn_in, ramp)
         });
 
         if sim < 30 { traj.push(1.0); }
@@ -347,9 +321,8 @@ pub fn run() {
     out.push_str(&format!("Simulations: {}\n", n_sims));
     out.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, 1.0/threshold));
     if let Some(ref cfg) = futility_config {
-        let mode = if cfg.mc_samples <= 50 { " (fast)" } else { "" };
-        out.push_str(&format!("Futility:    recovery={:.0}% ratio={:.2}x{}\n",
-            cfg.recovery_target * 100.0, cfg.stop_ratio, mode));
+        out.push_str(&format!("Futility:    recovery target={:.0}% (Bayesian)\n",
+            cfg.recovery_target * 100.0));
     } else {
         out.push_str("Futility:    disabled\n");
     }

@@ -786,187 +786,151 @@ pub fn t_test_power_continuous(effect: f64, sd: f64, n_total: usize, alpha: f64)
 // FUTILITY MONITORING
 // ============================================================================
 //
-// IMPORTANT: This is NOT a martingale or e-process. It is a simulation-based
+// IMPORTANT: This is NOT a martingale or e-process. It is an analytical
 // decision support tool that runs alongside the e-RT process.
 //
-// The FutilityMonitor uses Monte Carlo simulation to estimate P(recovery),
-// the probability that the trial will eventually cross the success threshold
-// assuming the true treatment effect equals the design effect.
+// The FutilityMonitor uses Bayesian integration to estimate P(recovery),
+// the probability that the trial will eventually cross the success threshold.
 //
-// CALIBRATION NOTE: The monitor shows different calibration for early vs late
-// checkpoints due to survivorship bias:
-// - Early stops (<50% of N): Well calibrated (~7% est vs ~10% actual)
-// - Late stops (>=50% of N): Pessimistic (~5% est vs ~20% actual)
+// APPROACH: Instead of Monte Carlo simulation, we use an analytical formula:
+//   1. Posterior on effect: δ ~ N(δ̂, SE²) where δ̂ is observed effect
+//   2. For given δ, P(recovery | δ) from random walk hitting probability
+//   3. Integrate: P(recovery) = ∫ P(recovery | δ) × p(δ | data) dδ
 //
-// Trials that first trigger a stop recommendation late have "survived" earlier
-// checkpoints, suggesting they were performing reasonably well until recently.
-// The point-in-time forward simulation doesn't capture this selection history.
+// The log-wealth is approximately a random walk with:
+//   - Drift per patient: μ(δ) = ½δ² (assuming estimate converges to truth)
+//   - Variance per patient: σ²(δ) = δ²
 //
-// Despite this, the monitor provides useful decision support. When it recommends
-// stop, the trial has genuinely poor prospects - the actual recovery rate is
-// always well below 50%, meaning most flagged trials would indeed fail.
+// This is faster and more principled than nested Monte Carlo.
 //
 
-/// Calibration table for survivorship bias correction.
-/// Maps (enrollment_fraction, raw_estimate) → actual_recovery_rate.
-/// Built from simulation data, no arbitrary functional form.
-#[derive(Clone, Debug)]
-pub struct CalibrationTable {
-    /// Number of bins for enrollment fraction t
-    t_bins: usize,
-    /// Number of bins for raw estimate
-    est_bins: usize,
-    /// Grid: [t_bin][est_bin] = (sum_actual, count)
-    grid: Vec<Vec<(f64, usize)>>,
+/// Gauss-Hermite quadrature nodes and weights (15 points)
+/// For integrating f(x) against exp(-x²)
+const GAUSS_HERMITE_15: [(f64, f64); 15] = [
+    (-4.499990707309392, 1.5224758042535e-9),
+    (-3.669950373404453, 1.0591155477110e-6),
+    (-2.967166927905603, 1.0000444123250e-4),
+    (-2.325732486173858, 2.7780688429127e-3),
+    (-1.719992575186489, 3.0780033872546e-2),
+    (-1.136115585210921, 1.5848891579594e-1),
+    (-0.565069583255576, 4.1202868749890e-1),
+    (0.0, 5.6410030872642e-1),
+    (0.565069583255576, 4.1202868749890e-1),
+    (1.136115585210921, 1.5848891579594e-1),
+    (1.719992575186489, 3.0780033872546e-2),
+    (2.325732486173858, 2.7780688429127e-3),
+    (2.967166927905603, 1.0000444123250e-4),
+    (3.669950373404453, 1.0591155477110e-6),
+    (4.499990707309392, 1.5224758042535e-9),
+];
+
+/// Compute P(hitting threshold) for random walk with drift
+///
+/// For a random walk starting at 0, needing to reach level G > 0,
+/// with drift μ and variance σ² per step, in n steps.
+///
+/// Uses the reflection principle approximation for Brownian motion:
+/// P(hit) ≈ Φ((μn - G)/(σ√n)) + exp(2μG/σ²)·Φ((-μn - G)/(σ√n))
+fn hitting_probability(gap: f64, n: usize, drift: f64, variance: f64) -> f64 {
+    if gap <= 0.0 {
+        return 1.0; // Already at or past threshold
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    if variance <= 1e-12 {
+        // Degenerate case: deterministic walk
+        return if drift * n as f64 >= gap { 1.0 } else { 0.0 };
+    }
+
+    let n_f = n as f64;
+    let sigma = variance.sqrt();
+    let sigma_sqrt_n = sigma * n_f.sqrt();
+
+    // Avoid overflow in exp term
+    let exponent = 2.0 * drift * gap / variance;
+
+    // First term: P(endpoint ≥ G)
+    let z1 = (drift * n_f - gap) / sigma_sqrt_n;
+    let term1 = normal_cdf(z1);
+
+    // Second term: reflection correction
+    let z2 = (-drift * n_f - gap) / sigma_sqrt_n;
+    let term2 = if exponent > 700.0 {
+        // exp would overflow, but Φ(z2) is tiny for large negative z2
+        // The product is bounded by 1
+        (1.0 - term1).min(1.0)
+    } else if exponent < -700.0 {
+        0.0
+    } else {
+        exponent.exp() * normal_cdf(z2)
+    };
+
+    (term1 + term2).clamp(0.0, 1.0)
 }
 
-impl CalibrationTable {
-    /// Create empty calibration table
-    pub fn new(t_bins: usize, est_bins: usize) -> Self {
-        let grid = vec![vec![(0.0, 0); est_bins]; t_bins];
-        CalibrationTable { t_bins, est_bins, grid }
+/// Compute drift and variance of log-wealth per patient given true effect δ
+///
+/// From the betting formula with λ = 0.5 ± 0.5·δ̂:
+///   E[log M] = 0.5·(1+δ)·log(1+δ̂) + 0.5·(1-δ)·log(1-δ̂)
+///   Var(log M) = 0.25·(1-δ²)·[log((1+δ̂)/(1-δ̂))]²
+///
+/// Assuming δ̂ → δ (estimate converges to truth):
+///   μ(δ) ≈ ½δ²
+///   σ²(δ) ≈ δ²
+fn log_wealth_drift_variance(delta: f64) -> (f64, f64) {
+    // Clamp to avoid numerical issues at extreme values
+    let d = delta.clamp(-0.5, 0.5);
+
+    if d.abs() < 1e-6 {
+        // Near zero effect: essentially no drift, tiny variance
+        return (0.0, 1e-8);
     }
 
-    /// Default table: 5 bins for t, 5 bins for estimate (0 to 0.2)
-    /// Coarser bins = more data per bin = better calibration at low estimates
-    pub fn default_bins() -> Self {
-        Self::new(5, 5)
+    // Drift: ½δ² (always positive when betting on correct effect)
+    let drift = 0.5 * d * d;
+
+    // Variance: δ²·(1 - δ²) ≈ δ² for small δ
+    let variance = d * d * (1.0 - d * d);
+
+    (drift, variance.max(1e-8))
+}
+
+/// Bayesian P(recovery) integrating over posterior on effect size
+///
+/// posterior_mean: observed effect estimate (δ̂)
+/// posterior_se: standard error of the estimate
+/// gap: log(threshold) - log(current_wealth)
+/// n_remaining: patients remaining in trial
+fn bayesian_recovery_probability(
+    posterior_mean: f64,
+    posterior_se: f64,
+    gap: f64,
+    n_remaining: usize,
+) -> f64 {
+    if gap <= 0.0 {
+        return 1.0;
+    }
+    if n_remaining == 0 {
+        return 0.0;
     }
 
-    /// Add observation: at enrollment t with raw estimate, did trial recover?
-    pub fn add(&mut self, t: f64, raw_estimate: f64, recovered: bool) {
-        let t_idx = ((t * self.t_bins as f64).floor() as usize).min(self.t_bins - 1);
-        let est_idx = ((raw_estimate * self.est_bins as f64 / 0.2).floor() as usize)
-            .min(self.est_bins - 1);
+    // Gauss-Hermite quadrature for ∫ f(δ) · φ((δ-μ)/σ)/σ dδ
+    // Transform: δ = μ + σ·√2·x, then integrate against exp(-x²)/√π
+    let sqrt_2 = std::f64::consts::SQRT_2;
+    let sqrt_pi = std::f64::consts::PI.sqrt();
 
-        self.grid[t_idx][est_idx].0 += if recovered { 1.0 } else { 0.0 };
-        self.grid[t_idx][est_idx].1 += 1;
+    let mut integral = 0.0;
+
+    for &(x, w) in &GAUSS_HERMITE_15 {
+        let delta = posterior_mean + posterior_se * sqrt_2 * x;
+        let (drift, variance) = log_wealth_drift_variance(delta);
+        let p_hit = hitting_probability(gap, n_remaining, drift, variance);
+        integral += w * p_hit;
     }
 
-    /// Lookup corrected estimate with bilinear interpolation
-    /// Falls back to shrinkage correction when bins have sparse data
-    pub fn lookup(&self, t: f64, raw_estimate: f64, threshold: f64) -> f64 {
-        // Get fractional bin indices
-        let t_frac = (t * self.t_bins as f64).max(0.0);
-        let est_frac = (raw_estimate * self.est_bins as f64 / 0.2).max(0.0);
-
-        let t_lo = (t_frac.floor() as usize).min(self.t_bins - 1);
-        let t_hi = (t_lo + 1).min(self.t_bins - 1);
-        let est_lo = (est_frac.floor() as usize).min(self.est_bins - 1);
-        let est_hi = (est_lo + 1).min(self.est_bins - 1);
-
-        let t_w = t_frac - t_lo as f64;
-        let est_w = est_frac - est_lo as f64;
-
-        // Get actual rates for 4 corners
-        // Sparse bins use shrinkage fallback instead of raw estimate
-        let get_rate = |ti: usize, ei: usize| -> f64 {
-            let (sum, count) = self.grid[ti][ei];
-            if count >= 5 {
-                sum / count as f64
-            } else {
-                // Shrink toward threshold: more pull-back when late (high t)
-                let t_approx = (ti as f64 + 0.5) / self.t_bins as f64;
-                raw_estimate + (threshold - raw_estimate) * t_approx.sqrt()
-            }
-        };
-
-        let r00 = get_rate(t_lo, est_lo);
-        let r01 = get_rate(t_lo, est_hi);
-        let r10 = get_rate(t_hi, est_lo);
-        let r11 = get_rate(t_hi, est_hi);
-
-        // Bilinear interpolation
-        let r0 = r00 * (1.0 - est_w) + r01 * est_w;
-        let r1 = r10 * (1.0 - est_w) + r11 * est_w;
-        r0 * (1.0 - t_w) + r1 * t_w
-    }
-
-    /// Build calibration table from simulations.
-    /// Records only FIRST checkpoint where estimate < threshold (survivorship bias scenario).
-    pub fn build(
-        p_ctrl: f64,
-        p_trt: f64,
-        n_total: usize,
-        threshold: f64,
-        burn_in: usize,
-        ramp: usize,
-        n_sims: usize,
-        seed: u64,
-    ) -> Self {
-        use rand::Rng;
-        use rand::SeedableRng;
-        use rand::rngs::StdRng;
-
-        let mut table = Self::default_bins();
-        let mut rng = StdRng::seed_from_u64(seed);
-        let config = FutilityConfig { mc_samples: 100, ..Default::default() };
-        let recovery_target = config.recovery_target;
-
-        for _ in 0..n_sims {
-            let mut proc = BinaryERTProcess::new(burn_in, ramp);
-            let mut first_low_checkpoint: Option<(f64, f64)> = None;
-
-            // Create monitor without calibration (raw estimates)
-            let mut monitor = FutilityMonitor::new_uncalibrated(
-                config.clone(), p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
-            );
-
-            for patient in 1..=n_total {
-                let is_trt = rng.gen_bool(0.5);
-                let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
-                proc.update(patient, if event { 1.0 } else { 0.0 }, is_trt);
-
-                if let Some(cp) = monitor.check(
-                    patient, proc.wealth,
-                    proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl
-                ) {
-                    // Only record FIRST checkpoint where estimate is low
-                    if first_low_checkpoint.is_none() && cp.recovery_prob < recovery_target * 1.5 {
-                        let t = patient as f64 / n_total as f64;
-                        first_low_checkpoint = Some((t, cp.recovery_prob));
-                    }
-                }
-
-                if proc.wealth >= threshold { break; }
-            }
-
-            let recovered = proc.wealth >= threshold;
-
-            // Add only the first low checkpoint (captures survivorship bias)
-            if let Some((t, est)) = first_low_checkpoint {
-                table.add(t, est, recovered);
-            }
-        }
-
-        table
-    }
-
-    /// Print calibration table summary
-    #[allow(dead_code)]
-    pub fn print_summary(&self) {
-        println!("\nCalibration Table (actual recovery rate by t and estimate):");
-        print!("         ");
-        for e in 0..self.est_bins {
-            print!(" {:>5.0}%", (e as f64 + 0.5) * 20.0 / self.est_bins as f64);
-        }
-        println!();
-
-        for t in 0..self.t_bins {
-            print!("t={:.0}%-{:.0}%:",
-                   t as f64 * 100.0 / self.t_bins as f64,
-                   (t + 1) as f64 * 100.0 / self.t_bins as f64);
-            for e in 0..self.est_bins {
-                let (sum, count) = self.grid[t][e];
-                if count >= 5 {
-                    print!(" {:>5.1}%", 100.0 * sum / count as f64);
-                } else {
-                    print!("    -- ");
-                }
-            }
-            println!();
-        }
-    }
+    // Normalize by √π (Gauss-Hermite integrates against exp(-x²), not the normal density)
+    (integral / sqrt_pi).clamp(0.0, 1.0)
 }
 
 /// Checkpoint result from futility monitoring
@@ -986,15 +950,13 @@ pub enum FutilityMode {
     Alert,   // Checking every alert_interval (wealth below danger threshold)
 }
 
-/// Configuration for futility monitoring (simulation-based, NOT a martingale)
+/// Configuration for futility monitoring (analytical Bayesian, NOT a martingale)
 #[derive(Clone, Debug)]
 pub struct FutilityConfig {
     pub recovery_target: f64,      // Default 0.10 (10% - "less than 10% chance of recovery")
     pub normal_interval_pct: f64,  // Default 0.05 (check every 5% of N)
     pub alert_interval_pct: f64,   // Default 0.01 (check every 1% when in danger)
     pub danger_threshold: f64,     // Default 0.5 (wealth below this triggers alert mode)
-    pub stop_ratio: f64,           // Default 1.75 (unused, kept for config compatibility)
-    pub mc_samples: usize,         // Default 500
     pub hysteresis_count: usize,   // Default 3 (consecutive checks above threshold to exit alert)
 }
 
@@ -1005,30 +967,7 @@ impl Default for FutilityConfig {
             normal_interval_pct: 0.05,
             alert_interval_pct: 0.01,
             danger_threshold: 0.5,
-            stop_ratio: 1.75,
-            mc_samples: 500,
             hysteresis_count: 3,
-        }
-    }
-}
-
-impl FutilityConfig {
-    /// Fast mode: faster with slightly less precision in futility estimates.
-    /// Use for interactive exploration; switch to default() for final analysis.
-    #[allow(dead_code)]
-    pub fn fast() -> Self {
-        FutilityConfig {
-            mc_samples: 100,
-            ..Default::default()
-        }
-    }
-
-    /// High precision mode for calibration testing
-    #[allow(dead_code)]
-    pub fn high_precision() -> Self {
-        FutilityConfig {
-            mc_samples: 1000,
-            ..Default::default()
         }
     }
 }
@@ -1037,25 +976,24 @@ impl FutilityConfig {
 pub struct FutilityMonitor {
     pub config: FutilityConfig,
     pub design_arr: f64,           // Design effect (p_ctrl - p_trt)
-    pub p_ctrl: f64,               // Control event rate
     pub n_total: usize,            // Total planned sample size
     pub threshold: f64,            // e-value threshold for success (e.g., 20)
     pub burn_in: usize,
-    pub ramp: usize,
 
     // State
     mode: FutilityMode,
     next_checkpoint: usize,
     consecutive_above: usize,      // Count for hysteresis
     pub checkpoints: Vec<FutilityCheckpoint>,
-
-    // Calibration table for survivorship bias correction (None = no correction)
-    calibration: Option<CalibrationTable>,
 }
 
 impl FutilityMonitor {
-    /// Create monitor without calibration (raw estimates, for calibration table building)
-    pub fn new_uncalibrated(
+    /// Create a new futility monitor
+    ///
+    /// Note: p_ctrl, p_trt, ramp are kept in signature for backward compatibility
+    /// but are no longer used (analytical approach doesn't need them)
+    #[allow(unused_variables)]
+    pub fn new(
         config: FutilityConfig,
         p_ctrl: f64,
         p_trt: f64,
@@ -1071,55 +1009,14 @@ impl FutilityMonitor {
         FutilityMonitor {
             config,
             design_arr,
-            p_ctrl,
             n_total,
             threshold,
             burn_in,
-            ramp,
             mode: FutilityMode::Normal,
             next_checkpoint: first_checkpoint,
             consecutive_above: 0,
             checkpoints: Vec::new(),
-            calibration: None,
         }
-    }
-
-    /// Create monitor with calibration table for survivorship bias correction
-    #[allow(dead_code)]
-    pub fn new_with_calibration(
-        config: FutilityConfig,
-        p_ctrl: f64,
-        p_trt: f64,
-        n_total: usize,
-        threshold: f64,
-        burn_in: usize,
-        ramp: usize,
-        calibration: CalibrationTable,
-    ) -> Self {
-        let mut monitor = Self::new_uncalibrated(
-            config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
-        );
-        monitor.calibration = Some(calibration);
-        monitor
-    }
-
-    /// Create monitor (backward compatible - uses fallback correction)
-    pub fn new(
-        config: FutilityConfig,
-        p_ctrl: f64,
-        p_trt: f64,
-        n_total: usize,
-        threshold: f64,
-        burn_in: usize,
-        ramp: usize,
-    ) -> Self {
-        // Use uncalibrated for now; calibration table can be set later
-        Self::new_uncalibrated(config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp)
-    }
-
-    /// Set calibration table
-    pub fn set_calibration(&mut self, calibration: CalibrationTable) {
-        self.calibration = Some(calibration);
     }
 
     /// Check if we should evaluate futility at this patient number
@@ -1130,9 +1027,9 @@ impl FutilityMonitor {
     /// Perform futility check and return checkpoint result
     /// Returns None if not at a checkpoint
     ///
-    /// Pass current process state for accurate forward simulation:
-    /// - n_trt, events_trt: treatment arm counts
-    /// - n_ctrl, events_ctrl: control arm counts
+    /// Uses analytical Bayesian calculation:
+    /// - Posterior on effect: δ ~ N(δ̂, SE²) from observed data
+    /// - P(recovery) = ∫ P(hit threshold | δ) × p(δ | data) dδ
     pub fn check(
         &mut self,
         patient: usize,
@@ -1148,28 +1045,45 @@ impl FutilityMonitor {
 
         let n_remaining = self.n_total.saturating_sub(patient);
 
-        // DECISION BASIS: Estimate P(recovery) assuming design effect continues
-        let p_trt_design = (self.p_ctrl - self.design_arr).max(0.001);
-        let raw_recovery_prob = self.estimate_recovery_prob(
-            wealth, n_remaining, patient, n_trt, events_trt, n_ctrl, events_ctrl, p_trt_design
-        );
+        // Compute observed effect and its standard error
+        // δ = rate_trt - rate_ctrl (negative means treatment is better for events)
+        let rate_trt = if n_trt > 0.0 { events_trt / n_trt } else { 0.5 };
+        let rate_ctrl = if n_ctrl > 0.0 { events_ctrl / n_ctrl } else { 0.5 };
+        let delta_obs = rate_trt - rate_ctrl;
 
-        // Survivorship bias correction using calibration table or fallback formula
-        let t = patient as f64 / self.n_total as f64;
-        let threshold = self.config.recovery_target;
-        let corrected_recovery_prob = if let Some(ref cal) = self.calibration {
-            // Use calibration table lookup (with shrinkage fallback for sparse bins)
-            cal.lookup(t, raw_recovery_prob, threshold)
-        } else if raw_recovery_prob < threshold && t > 0.1 {
-            // Fallback: shrink toward threshold (no calibration table)
-            raw_recovery_prob + (threshold - raw_recovery_prob) * t.sqrt()
+        // Standard error of difference in proportions
+        // SE = sqrt(p_t(1-p_t)/n_t + p_c(1-p_c)/n_c)
+        let var_trt = if n_trt > 1.0 {
+            rate_trt * (1.0 - rate_trt) / n_trt
         } else {
-            raw_recovery_prob
+            0.25 / n_trt.max(1.0)  // Conservative prior variance
+        };
+        let var_ctrl = if n_ctrl > 1.0 {
+            rate_ctrl * (1.0 - rate_ctrl) / n_ctrl
+        } else {
+            0.25 / n_ctrl.max(1.0)
+        };
+        let se = (var_trt + var_ctrl).sqrt().max(0.01);  // Floor to avoid numerical issues
+
+        // Gap in log-space: how much more log-wealth do we need?
+        let gap = if wealth > 0.0 {
+            (self.threshold / wealth).ln()
+        } else {
+            f64::INFINITY
         };
 
-        // REPORTING: Calculate ratio using corrected estimate
-        let ratio = if corrected_recovery_prob > 0.01 {
-            self.config.recovery_target / corrected_recovery_prob
+        // Analytical P(recovery) via Bayesian integration
+        let recovery_prob = if gap <= 0.0 {
+            1.0  // Already at or past threshold
+        } else if n_remaining == 0 || gap.is_infinite() {
+            0.0
+        } else {
+            bayesian_recovery_probability(delta_obs, se, gap, n_remaining)
+        };
+
+        // Calculate ratio for reporting
+        let ratio = if recovery_prob > 0.01 {
+            self.config.recovery_target / recovery_prob
         } else {
             f64::INFINITY
         };
@@ -1194,106 +1108,18 @@ impl FutilityMonitor {
         let step = ((self.n_total as f64 * interval).ceil() as usize).max(1);
         self.next_checkpoint = patient + step;
 
-        // Build checkpoint - decision based on corrected estimate vs base threshold
+        // Build checkpoint
         let checkpoint = FutilityCheckpoint {
             patient,
             wealth,
             mode: self.mode.clone(),
             ratio,
-            recovery_prob: corrected_recovery_prob,  // Store corrected estimate
-            recommend_stop: corrected_recovery_prob < self.config.recovery_target,
+            recovery_prob,
+            recommend_stop: recovery_prob < self.config.recovery_target,
         };
 
         self.checkpoints.push(checkpoint.clone());
         Some(checkpoint)
-    }
-
-    /// Estimate probability of recovery (crossing threshold) with given treatment effect
-    fn estimate_recovery_prob(
-        &self,
-        current_wealth: f64,
-        n_remaining: usize,
-        current_patient: usize,
-        n_trt: f64,
-        events_trt: f64,
-        n_ctrl: f64,
-        events_ctrl: f64,
-        p_trt: f64,
-    ) -> f64 {
-        use rand::Rng;
-        use rand::SeedableRng;
-        use rand::rngs::StdRng;
-
-        if n_remaining == 0 {
-            return 0.0;
-        }
-
-        // Already above threshold
-        if current_wealth >= self.threshold {
-            return 1.0;
-        }
-
-        // Use state-dependent seed to avoid systematic bias from fixed seed
-        // Hash: combine state values to create unique seed per call
-        let state_hash = (current_patient as u64)
-            .wrapping_mul(31)
-            .wrapping_add((current_wealth * 10000.0) as u64)
-            .wrapping_mul(31)
-            .wrapping_add((n_trt * 100.0) as u64)
-            .wrapping_mul(31)
-            .wrapping_add((events_trt * 100.0) as u64);
-        let mut rng = StdRng::seed_from_u64(state_hash);
-        let mut successes = 0usize;
-
-        for _ in 0..self.config.mc_samples {
-            let mut wealth = current_wealth;
-            let (mut n_t, mut e_t, mut n_c, mut e_c) = (n_trt, events_trt, n_ctrl, events_ctrl);
-
-            for j in 1..=n_remaining {
-                let is_trt = rng.gen_bool(0.5);
-                let event = rng.gen_bool(if is_trt { p_trt } else { self.p_ctrl });
-
-                // Delta estimation matching real process (0.5 default for empty arm)
-                let rate_t = if n_t > 0.0 { e_t / n_t } else { 0.5 };
-                let rate_c = if n_c > 0.0 { e_c / n_c } else { 0.5 };
-                let delta = rate_t - rate_c;
-
-                // Update counts
-                if is_trt {
-                    n_t += 1.0;
-                    if event { e_t += 1.0; }
-                } else {
-                    n_c += 1.0;
-                    if event { e_c += 1.0; }
-                }
-
-                // Ramp based on actual patient number
-                let actual_patient = current_patient + j;
-                let c = if actual_patient > self.burn_in {
-                    ((actual_patient - self.burn_in) as f64 / self.ramp as f64).min(1.0)
-                } else {
-                    0.0
-                };
-
-                if c > 0.0 {
-                    let lambda = if event {
-                        0.5 + 0.5 * c * delta
-                    } else {
-                        0.5 - 0.5 * c * delta
-                    };
-                    let lambda = lambda.clamp(0.001, 0.999);
-                    let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-                    wealth *= mult;
-                }
-
-                if wealth >= self.threshold {
-                    successes += 1;
-                    break;
-                }
-            }
-        }
-
-        successes as f64 / self.config.mc_samples as f64
     }
 
     /// Get summary of futility monitoring
@@ -1582,7 +1408,7 @@ mod tests {
             }
 
             // Estimate P(recovery) at this point
-            let config = FutilityConfig { mc_samples: 200, ..Default::default() };
+            let config = FutilityConfig::default();
             let mut monitor = FutilityMonitor::new(
                 config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
             );
@@ -1643,7 +1469,7 @@ mod tests {
                 proc.update(i, if event { 1.0 } else { 0.0 }, is_trt);
             }
 
-            let config = FutilityConfig { mc_samples: 200, ..Default::default() };
+            let config = FutilityConfig::default();
             let mut monitor = FutilityMonitor::new(
                 config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
             );
@@ -1680,7 +1506,7 @@ mod tests {
             println!("N trials with P < 10%: {}", low_estimates.len());
             println!("Avg estimated P(rec):  {:.1}%", low_avg * 100.0);
             println!("Actual recovery rate:  {:.1}%", low_actual * 100.0);
-            // Note: We expect some inflation due to selection bias / regression to mean
+            // Note: analytical approach should handle selection bias better
         }
     }
 
@@ -1688,7 +1514,6 @@ mod tests {
     #[test]
     fn test_futility_monitor_sanity() {
         let config = FutilityConfig::default();
-        assert_eq!(config.stop_ratio, 1.75);
         assert_eq!(config.recovery_target, 0.10);
 
         let mut monitor = FutilityMonitor::new(
@@ -1741,11 +1566,8 @@ mod tests {
         for _ in 0..n_sims {
             let mut proc = BinaryERTProcess::new(burn_in, ramp);
 
-            // Use actual FutilityMonitor with NO correction to get raw estimates
-            let config = FutilityConfig {
-                mc_samples: 200,
-                ..Default::default()
-            };
+            // Use actual FutilityMonitor to get estimates
+            let config = FutilityConfig::default();
             let mut monitor = FutilityMonitor::new(
                 config, p_ctrl, p_trt, n_total, threshold, burn_in, ramp,
             );
