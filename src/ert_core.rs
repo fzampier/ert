@@ -78,6 +78,7 @@ pub fn get_string(prompt: &str) -> String {
 }
 
 /// Get choice from numbered options
+#[allow(dead_code)]
 pub fn get_choice(prompt: &str, options: &[&str]) -> usize {
     loop {
         println!("{}", prompt);
@@ -375,71 +376,7 @@ impl BinaryERTProcess {
 }
 
 // ============================================================================
-// CONTINUOUS e-RTo PROCESS (bounded/ordinal)
-// ============================================================================
-
-/// e-RTo process for bounded continuous outcomes (e.g., VFD 0-28)
-pub struct LinearERTProcess {
-    pub wealth: f64,
-    pub burn_in: usize,
-    pub ramp: usize,
-    pub min_val: f64,
-    pub max_val: f64,
-    sum_trt: f64,
-    n_trt: f64,
-    sum_ctrl: f64,
-    n_ctrl: f64,
-}
-
-impl LinearERTProcess {
-    pub fn new(burn_in: usize, ramp: usize, min_val: f64, max_val: f64) -> Self {
-        Self {
-            wealth: 1.0, burn_in, ramp, min_val, max_val,
-            sum_trt: 0.0, n_trt: 0.0, sum_ctrl: 0.0, n_ctrl: 0.0,
-        }
-    }
-
-    pub fn update(&mut self, i: usize, outcome: f64, is_trt: bool) {
-        let mean_trt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { (self.min_val + self.max_val) / 2.0 };
-        let mean_ctrl = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { (self.min_val + self.max_val) / 2.0 };
-        let delta_hat = mean_trt - mean_ctrl;
-
-        if is_trt { self.n_trt += 1.0; self.sum_trt += outcome; }
-        else { self.n_ctrl += 1.0; self.sum_ctrl += outcome; }
-
-        if i > self.burn_in {
-            let range = self.max_val - self.min_val;
-            if range.abs() < 1e-10 {
-                return; // Cannot compute without valid range
-            }
-            let c_i = (((i - self.burn_in) as f64) / self.ramp as f64).clamp(0.0, 1.0);
-            let x = (outcome - self.min_val) / range;
-            let scalar = 2.0 * x - 1.0;
-            let delta_norm = delta_hat / range;
-            let lambda = (0.5 + 0.5 * c_i * delta_norm * scalar).clamp(0.001, 0.999);
-            let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-            self.wealth *= mult;
-        }
-    }
-
-    pub fn current_effect(&self) -> f64 {
-        let mt = if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 };
-        let mc = if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 };
-        mt - mc
-    }
-
-    pub fn get_means(&self) -> (f64, f64) {
-        (if self.n_trt > 0.0 { self.sum_trt / self.n_trt } else { 0.0 },
-         if self.n_ctrl > 0.0 { self.sum_ctrl / self.n_ctrl } else { 0.0 })
-    }
-
-    pub fn get_ns(&self) -> (usize, usize) {
-        (self.n_trt as usize, self.n_ctrl as usize)
-    }
-}
-
-// ============================================================================
-// CONTINUOUS e-RTc PROCESS (unbounded/MAD-based)
+// CONTINUOUS e-RTc PROCESS (MAD-based)
 // ============================================================================
 
 /// e-RTc process for unbounded continuous outcomes (biomarkers, lab values)

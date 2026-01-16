@@ -8,7 +8,6 @@ mod analyze_binary;
 mod analyze_continuous;
 mod analyze_survival;
 mod analyze_multistate;
-mod compare_methods;
 mod multistate_experiment;
 
 use std::env;
@@ -167,12 +166,6 @@ fn parse_analyze_options(args: &[String]) -> AnalyzeOptions {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--method" | "-m" => {
-                if i + 1 < args.len() {
-                    opts.method = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
             "--threshold" | "-t" => {
                 if i + 1 < args.len() {
                     opts.threshold = args[i + 1].parse().ok();
@@ -191,18 +184,6 @@ fn parse_analyze_options(args: &[String]) -> AnalyzeOptions {
                     i += 1;
                 }
             }
-            "--min" => {
-                if i + 1 < args.len() {
-                    opts.min_val = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--max" => {
-                if i + 1 < args.len() {
-                    opts.max_val = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
             "--no-report" => {
                 opts.generate_report = false;
             }
@@ -215,24 +196,18 @@ fn parse_analyze_options(args: &[String]) -> AnalyzeOptions {
 
 #[derive(Default)]
 pub struct AnalyzeOptions {
-    pub method: Option<String>,      // "rto", "rtc"
     pub threshold: Option<f64>,      // default 20
     pub burn_in: Option<usize>,      // default 50
     pub ramp: Option<usize>,         // default 100
-    pub min_val: Option<f64>,        // for e-RTo
-    pub max_val: Option<f64>,        // for e-RTo
     pub generate_report: bool,       // default true
 }
 
 impl AnalyzeOptions {
     fn default() -> Self {
         AnalyzeOptions {
-            method: None,
             threshold: None,
             burn_in: None,
             ramp: None,
-            min_val: None,
-            max_val: None,
             generate_report: true,
         }
     }
@@ -302,18 +277,15 @@ fn print_usage() {
     println!("USAGE:");
     println!("  ert                                   Interactive mode");
     println!("  ert analyze <file.csv>                Auto-detect and analyze trial data");
-    println!("  ert analyze-continuous <file.csv>     Analyze continuous trial data (e-RTo/c)");
+    println!("  ert analyze-continuous <file.csv>     Analyze continuous trial data (e-RTc)");
     println!("  ert analyze-binary <file.csv>         Analyze binary trial data (e-RT)");
     println!("  ert analyze-survival <file.csv>       Analyze survival trial data (e-RTs)");
     println!("  ert analyze-multistate <file.csv>     Analyze multi-state trial data (e-RTms)");
     println!();
     println!("OPTIONS:");
-    println!("  -m, --method <rto|rtc>   Method (default: rtc)");
     println!("  -t, --threshold <N>      Success threshold (default: 20)");
     println!("  -b, --burn-in <N>        Burn-in period (default: 50/30)");
     println!("  -r, --ramp <N>           Ramp period (default: 100/50)");
-    println!("  --min <N>                Min bound (e-RTo only)");
-    println!("  --max <N>                Max bound (e-RTo only)");
     println!("  -s, --states <names>     State names, comma-separated (multistate)");
     println!("  --no-report              Skip HTML report generation");
     println!();
@@ -324,7 +296,7 @@ fn print_usage() {
     println!("  multistate:  patient_id,time,state,treatment (state: 0=worst, N-1=best)");
     println!();
     println!("EXAMPLES:");
-    println!("  ert analyze trial.csv --method rtc");
+    println!("  ert analyze trial.csv");
     println!("  ert analyze-binary mortality.csv --threshold 20");
     println!("  ert analyze-survival os_data.csv --burn-in 30");
     println!("  ert analyze-multistate icu.csv --states \"Dead,ICU,Ward,Home\"");
@@ -336,16 +308,15 @@ fn run_interactive() {
     println!("==========================================");
     println!("\nSelect an option:");
     println!("  1. e-RT   (binary endpoint)");
-    println!("  2. e-RTo/c (continuous endpoint)");
-    println!("  3. e-RTs  (survival/time-to-event)");
-    println!("  4. e-RTms (multi-state)");
-    println!("  5. e-RTu  (universal/agnostic)");
+    println!("  2. e-RTc  (continuous endpoint)");
+    println!("  3. e-RTu  (universal/agnostic)");
+    println!("  4. e-RTs  (survival/time-to-event)");
+    println!("  5. e-RTms (multi-state)");
     println!("  6. Analyze Binary Trial (CSV)");
     println!("  7. Analyze Continuous Trial (CSV)");
     println!("  8. Analyze Survival Trial (CSV)");
     println!("  9. Analyze Multi-State Trial (CSV)");
-    println!(" 10. Compare e-RTo vs e-RTc");
-    println!(" 11. [Demo] Why stratification works");
+    println!(" 10. [Demo] Why stratification works");
     println!("  0. Exit");
 
     print!("\nSelect: ");
@@ -357,9 +328,9 @@ fn run_interactive() {
     match input.trim() {
         "1" => binary::run(),
         "2" => continuous::run(),
-        "3" => survival::run(),
-        "4" => multistate::run(),
-        "5" => agnostic::run(),
+        "3" => agnostic::run(),
+        "4" => survival::run(),
+        "5" => multistate::run(),
         "6" => {
             if let Err(e) = analyze_binary::run() {
                 eprintln!("Error: {}", e);
@@ -376,8 +347,7 @@ fn run_interactive() {
             }
         }
         "9" => run_analyze_multistate_interactive(),
-        "10" => compare_methods::run(),
-        "11" => multistate_experiment::run(),
+        "10" => multistate_experiment::run(),
         "0" => println!("Goodbye!"),
         _ => println!("Invalid option"),
     }

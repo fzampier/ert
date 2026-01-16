@@ -12,16 +12,15 @@ Sequential Randomization Tests using e-values (betting martingales).
 | Module | Menu | Use Case | Effect Measure |
 |--------|------|----------|----------------|
 | e-RT | 1 | Binary outcomes (response/no response) | Risk Difference, OR |
-| e-RTo | 2 | Bounded continuous (VFD 0-28, scores) | Mean Difference |
-| e-RTc | 2 | Unbounded continuous (biomarkers) | Cohen's d |
-| e-RTs | 3 | Time-to-event (survival) | Hazard-based |
-| e-RTms | 4 | Multi-state (ordinal trajectories) | Proportional OR |
-| e-RTu | 5 | Universal/agnostic | Rate Difference |
+| e-RTc | 2 | Continuous outcomes (biomarkers, lab values) | Cohen's d |
+| e-RTu | 3 | Universal/agnostic | Rate Difference |
+| e-RTs | 4 | Time-to-event (survival) | Hazard-based |
+| e-RTms | 5 | Multi-state (ordinal trajectories) | Proportional OR |
 | Analyze Binary | 6 | Real trial CSV (binary) | RD, OR |
-| Analyze Continuous | 7 | Real trial CSV (continuous) | Mean Diff, d |
+| Analyze Continuous | 7 | Real trial CSV (continuous) | Cohen's d |
 | Analyze Survival | 8 | Real trial CSV (survival) | HR |
 | Analyze Multi-State | 9 | Real trial CSV (multi-state) | Proportional OR |
-| Compare Methods | 10 | e-RTo vs e-RTc comparison | Both |
+| Stratification Demo | 10 | Why stratification works | - |
 
 ---
 
@@ -36,7 +35,7 @@ Three layers of sequential testing, from most to least powerful:
 |                                                             |
 |                     | pay for sequential                    |
 |                     v                                       |
-|  DEDICATED (e-RT, e-RTo, e-RTs, e-RTms)                     |
+|  DEDICATED (e-RT, e-RTc, e-RTs, e-RTms)                     |
 |  Sequential. Anytime-valid. Domain-aware betting.           |
 |  Uses domain knowledge (rates, means, hazards, transitions).|
 |                                                             |
@@ -139,54 +138,11 @@ For patient n with outcome Y_n in {0, 1}:
 
 ---
 
-### 2. e-RTo (Continuous Bounded/Ordinal)
+### 2. e-RTc (Continuous Endpoint)
 
-**Menu option:** 2, then select option 1
+**Menu option:** 2
 
-**Use case:** Bounded continuous outcomes like Ventilator-Free Days (0-28), pain scores (0-10).
-
-**Formula:**
-
-```
-Let mu_T(n) = observed treatment mean up to patient n-1
-    mu_C(n) = observed control mean up to patient n-1
-    delta(n) = mu_T(n) - mu_C(n)
-    range = max_val - min_val
-
-Ramp factor:
-    c(n) = clamp((n - burn_in) / ramp, 0, 1)
-
-Normalized outcome:
-    x(n) = (Y_n - min_val) / range        # maps to [0, 1]
-    scalar(n) = 2 * x(n) - 1               # maps to [-1, 1]
-
-Normalized effect:
-    delta_norm(n) = delta(n) / range
-
-Betting fraction:
-    lambda_n = 0.5 + 0.5 * c(n) * delta_norm(n) * scalar(n)
-    lambda_n = clamp(lambda_n, 0.001, 0.999)
-```
-
-**Intuition:** High outcomes (scalar > 0) suggest treatment is better if delta > 0. Low outcomes suggest control is better if delta > 0.
-
-**Parameters:**
-- `Control mean`: Expected mean in control arm
-- `Treatment mean`: Expected mean in treatment arm
-- `SD`: Standard deviation
-- `Min bound`: Minimum possible value (e.g., 0)
-- `Max bound`: Maximum possible value (e.g., 28)
-- `Patients per trial`: Sample size
-- `Simulations`: Monte Carlo runs
-- `Threshold`: e-value threshold (default 20)
-
----
-
-### 3. e-RTc (Continuous Unbounded/MAD)
-
-**Menu option:** 2, then select option 2
-
-**Use case:** Unbounded continuous outcomes like biomarkers, lab values.
+**Use case:** Continuous outcomes like biomarkers, lab values, any continuous measurement.
 
 **Formula:**
 
@@ -230,9 +186,47 @@ Betting fraction:
 
 ---
 
-### 4. e-RTs (Survival/Time-to-Event)
+### 3. e-RTu (Universal/Agnostic)
 
 **Menu option:** 3
+
+**Use case:** Domain-agnostic e-process. Only sees (arm, good/bad) signals.
+
+**Formula:**
+
+```
+Input: sequence of (arm, good) pairs where good in {true, false}
+
+Let r_T(n) = good_T / n_T = observed "good" rate in treatment
+    r_C(n) = good_C / n_C = observed "good" rate in control
+    delta(n) = r_T(n) - r_C(n)
+
+Ramp factor:
+    c(n) = clamp((n - burn_in) / ramp, 0, 1)
+
+For signal n with outcome good_n:
+    If good_n = true:
+        lambda_n = 0.5 + 0.5 * c(n) * delta(n)
+    If good_n = false:
+        lambda_n = 0.5 - 0.5 * c(n) * delta(n)
+
+    lambda_n = clamp(lambda_n, 0.01, 0.99)
+```
+
+**Intuition:** Identical to e-RT but accepts any source that can map outcomes to good/bad.
+
+**Works well for:**
+- Binary outcomes (equivalent to e-RT)
+- Multi-state transitions (good = favorable transition)
+
+**Does NOT work for:**
+- Survival (info is in timing, not binary signal)
+
+---
+
+### 4. e-RTs (Survival/Time-to-Event)
+
+**Menu option:** 4
 
 **Use case:** Trials with time-to-event outcomes (overall survival, progression-free survival).
 
@@ -272,13 +266,13 @@ Cumulative signal drives betting:
 - `Patients`: Total sample size
 - `Simulations`: Monte Carlo runs
 
-**Note:** e-RTu (universal) was removed from survival as it doesn't work - survival information is encoded in event timing, not binary good/bad signals.
+**Note:** e-RTu (universal) doesn't work well for survival as information is encoded in event timing, not binary good/bad signals.
 
 ---
 
 ### 5. e-RTms (Multi-State)
 
-**Menu option:** 4
+**Menu option:** 5
 
 **Use case:** Trials tracking patients through multiple ordered states (e.g., Dead < ICU < Ward < Home).
 
@@ -363,45 +357,7 @@ Stratification recovers power when patients bounce between non-absorbing states.
 
 ---
 
-### 6. e-RTu (Universal/Agnostic)
-
-**Menu option:** 5
-
-**Use case:** Domain-agnostic e-process. Only sees (arm, good/bad) signals.
-
-**Formula:**
-
-```
-Input: sequence of (arm, good) pairs where good in {true, false}
-
-Let r_T(n) = good_T / n_T = observed "good" rate in treatment
-    r_C(n) = good_C / n_C = observed "good" rate in control
-    delta(n) = r_T(n) - r_C(n)
-
-Ramp factor:
-    c(n) = clamp((n - burn_in) / ramp, 0, 1)
-
-For signal n with outcome good_n:
-    If good_n = true:
-        lambda_n = 0.5 + 0.5 * c(n) * delta(n)
-    If good_n = false:
-        lambda_n = 0.5 - 0.5 * c(n) * delta(n)
-
-    lambda_n = clamp(lambda_n, 0.01, 0.99)
-```
-
-**Intuition:** Identical to e-RT but accepts any source that can map outcomes to good/bad.
-
-**Works well for:**
-- Binary outcomes (equivalent to e-RT)
-- Multi-state transitions (good = favorable transition)
-
-**Does NOT work for:**
-- Survival (info is in timing, not binary signal)
-
----
-
-### 7. Analyze Binary Trial (CSV)
+### 6. Analyze Binary Trial (CSV)
 
 **Menu option:** 6
 
@@ -427,7 +383,7 @@ treatment,outcome
 
 ---
 
-### 8. Analyze Continuous Trial (CSV)
+### 7. Analyze Continuous Trial (CSV)
 
 **Menu option:** 7
 
@@ -442,13 +398,11 @@ treatment,outcome
 ...
 ```
 
-**Methods:**
-- **e-RTo:** Uses bounded formula (requires min/max)
-- **e-RTc:** Uses MAD formula (unbounded)
+**Uses e-RTc formula** (MAD-based) applied to real data sequentially.
 
 ---
 
-### 9. Analyze Survival Trial (CSV)
+### 8. Analyze Survival Trial (CSV)
 
 **Menu option:** 8
 
@@ -486,7 +440,7 @@ treatment,time,status
 
 ---
 
-### 10. Analyze Multi-State Trial (CSV)
+### 9. Analyze Multi-State Trial (CSV)
 
 **Menu option:** 9
 
@@ -536,11 +490,11 @@ ert analyze-multistate icu_trial.csv --states "Dead,ICU,Ward,Home"
 
 ---
 
-### 11. Compare e-RTo vs e-RTc
+### 10. Stratification Demo
 
 **Menu option:** 10
 
-Runs both methods on identical simulated data to compare Type I error and power.
+Demonstrates why stratification matters for multi-state outcomes with bouncing (non-absorbing) states.
 
 ---
 
@@ -573,7 +527,7 @@ Purpose: Prevents catastrophic early losses from noise before effect direction i
 | Module | Burn-in | Ramp | Rationale |
 |--------|---------|------|-----------|
 | e-RT (binary) | 50 | 100 | Binary data is noisy; more patients needed to learn direction |
-| e-RTo/c (continuous) | 20 | 50 | Continuous outcomes carry more information per patient |
+| e-RTc (continuous) | 20 | 50 | Continuous outcomes carry more information per patient |
 | e-RTs (survival) | 30 | 50 | Events are sparse; balance between learning and not waiting too long |
 | e-RTms (multi-state) | 30 | 50 | Multiple transitions per patient; similar to survival |
 
@@ -616,7 +570,7 @@ Reports use:
 | File | Source |
 |------|--------|
 | `binary_report.html` | e-RT simulation |
-| `continuous_report.html` | e-RTo/c simulation |
+| `continuous_report.html` | e-RTc simulation |
 | `survival_report.html` | e-RTs simulation |
 | `multistate_report.html` | e-RTms simulation |
 | `agnostic_report.html` | e-RTu simulation |
@@ -624,7 +578,6 @@ Reports use:
 | `continuous_analysis_report.html` | Analyze Continuous (CSV) |
 | `survival_analysis_report.html` | Analyze Survival (CSV) |
 | `multistate_analysis_report.html` | Analyze Multi-State (CSV) |
-| `comparison_report.html` | Compare Methods |
 
 ---
 

@@ -6,29 +6,13 @@ use std::io::{self, Write};
 use std::fs::File;
 
 use crate::ert_core::{
-    get_input, get_input_usize, get_bool, get_optional_input, get_choice,
+    get_input, get_input_usize, get_bool, get_optional_input,
     calculate_n_continuous, chrono_lite, t_test_power_continuous,
-    LinearERTProcess, MADProcess,
+    MADProcess,
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
-// === STRUCTS ===
-
-#[derive(Clone, Copy, PartialEq)]
-enum Method { LinearERT, MAD }
-
-#[derive(Clone, Copy, PartialEq)]
-enum Distribution { Uniform, Normal, VFDMixture }
-
-#[derive(Clone, Copy)]
-struct VFDParams {
-    p_death_ctrl: f64,
-    p_death_trt: f64,
-    survivor_mean_ctrl: f64,  // mean VFD among survivors (e.g., 18)
-    survivor_mean_trt: f64,   // mean VFD among survivors (e.g., 21)
-    max_val: f64,             // typically 28
-}
-
+#[allow(dead_code)]
 struct Trial {
     stop_n: Option<usize>,
     effect_at_stop: f64,
@@ -38,7 +22,7 @@ struct Trial {
     agnostic_stopped: bool,
 }
 
-// === T-TEST ===
+// === STATISTICS ===
 
 fn t_test_significant(outcomes: &[(f64, bool)], alpha: f64) -> bool {
     let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
@@ -94,496 +78,28 @@ fn gamma_ln(x: f64) -> f64 {
     -tmp + (2.5066282746310005 * ser / x).ln()
 }
 
-// === VFD MIXTURE SAMPLING ===
-
-/// Sample from Beta(alpha, beta) using rejection sampling
-fn sample_beta<R: Rng + ?Sized>(rng: &mut R, alpha: f64, beta: f64) -> f64 {
-    // Use Gamma sampling method: X ~ Gamma(alpha), Y ~ Gamma(beta), then X/(X+Y) ~ Beta(alpha, beta)
-    let x = sample_gamma(rng, alpha);
-    let y = sample_gamma(rng, beta);
-    if x + y > 0.0 { x / (x + y) } else { 0.5 }
-}
-
-/// Sample from Gamma(shape, 1) using Marsaglia and Tsang's method
-fn sample_gamma<R: Rng + ?Sized>(rng: &mut R, shape: f64) -> f64 {
-    if shape < 1.0 {
-        // For shape < 1, use: Gamma(shape) = Gamma(shape+1) * U^(1/shape)
-        let u: f64 = rng.gen();
-        sample_gamma(rng, shape + 1.0) * u.powf(1.0 / shape)
-    } else {
-        let d = shape - 1.0 / 3.0;
-        let c = 1.0 / (9.0 * d).sqrt();
-        loop {
-            let x: f64 = sample_standard_normal(rng);
-            let v = (1.0 + c * x).powi(3);
-            if v > 0.0 {
-                let u: f64 = rng.gen();
-                if u < 1.0 - 0.0331 * x.powi(4) || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
-                    return d * v;
-                }
-            }
-        }
-    }
-}
-
-/// Box-Muller transform for standard normal
-fn sample_standard_normal<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+fn sample_normal<R: Rng + ?Sized>(rng: &mut R, mean: f64, sd: f64) -> f64 {
     let u1: f64 = rng.gen();
     let u2: f64 = rng.gen();
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-}
-
-/// Sample from VFD mixture model
-fn sample_vfd<R: Rng + ?Sized>(rng: &mut R, p_death: f64, survivor_mean: f64, max_val: f64) -> f64 {
-    if rng.gen::<f64>() < p_death {
-        0.0  // Death
-    } else {
-        // Survivor: Beta distribution scaled to [1, max_val]
-        // Map survivor_mean (on 1..max_val) to Beta mean (on 0..1)
-        let beta_mean = (survivor_mean - 1.0) / (max_val - 1.0);
-        let beta_mean = beta_mean.clamp(0.05, 0.95);  // Avoid extreme parameters
-
-        // Use concentration parameter to control variance
-        // Higher concentration = tighter distribution around mean
-        let concentration = 8.0;  // Reasonable spread
-        let alpha = beta_mean * concentration;
-        let beta = (1.0 - beta_mean) * concentration;
-
-        // Sample and scale to [1, max_val]
-        let x = sample_beta(rng, alpha, beta);
-        1.0 + x * (max_val - 1.0)
-    }
-}
-
-/// Calculate mean and SD for VFD mixture (for sample size calculation)
-fn vfd_mixture_moments(p_death: f64, survivor_mean: f64, max_val: f64) -> (f64, f64) {
-    // E[X] = (1 - p_death) * survivor_mean + p_death * 0
-    let mean = (1.0 - p_death) * survivor_mean;
-
-    // Var[X] = E[X^2] - E[X]^2
-    // E[X^2] = (1-p_death) * E[X^2 | survivor] + p_death * 0
-    // For Beta on [1, max_val]: E[X^2|survivor] ≈ survivor_mean^2 + variance_survivor
-    let beta_mean = (survivor_mean - 1.0) / (max_val - 1.0);
-    let concentration = 8.0;
-    let alpha = beta_mean.clamp(0.05, 0.95) * concentration;
-    let beta_param = (1.0 - beta_mean.clamp(0.05, 0.95)) * concentration;
-    let beta_var = (alpha * beta_param) / ((alpha + beta_param).powi(2) * (alpha + beta_param + 1.0));
-    let survivor_var = beta_var * (max_val - 1.0).powi(2);
-
-    // Total variance using law of total variance
-    let e_x2_survivor = survivor_mean.powi(2) + survivor_var;
-    let e_x2 = (1.0 - p_death) * e_x2_survivor;
-    let var = e_x2 - mean.powi(2) + p_death * (1.0 - p_death) * survivor_mean.powi(2);
-
-    (mean, var.sqrt())
-}
-
-// === SIMULATION ===
-
-fn run_simulation<R: Rng + ?Sized>(
-    rng: &mut R, method: Method, n_pts: usize, n_sims: usize,
-    mu_ctrl: f64, mu_trt: f64, sd: f64, min_val: f64, max_val: f64,
-    _design_effect: f64, threshold: f64, _fut_watch: f64,
-    burn_in: usize, ramp: usize, c_max: f64,
-    distribution: Distribution, vfd_params: Option<VFDParams>,
-) -> (Vec<Trial>, Vec<Vec<f64>>, Vec<usize>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
-    let alpha = 1.0 / threshold;
-
-    // Sample indices for trajectories
-    let sample_indices: Vec<usize> = (0..30.min(n_sims)).collect();
-    let step = (n_pts / 100).max(1);
-    let steps: Vec<usize> = (1..=n_pts).filter(|&i| i % step == 0 || i == n_pts).collect();
-
-    let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
-    let mut sample_trajs: Vec<Vec<f64>> = vec![Vec::with_capacity(steps.len()); sample_indices.len()];
-    let mut y_lo: Vec<f64> = vec![0.0; steps.len()];
-    let mut y_med: Vec<f64> = vec![0.0; steps.len()];
-    let mut y_hi: Vec<f64> = vec![0.0; steps.len()];
-
-    // Running percentile buffers
-    let mut step_vals: Vec<Vec<f64>> = vec![Vec::with_capacity(n_sims); steps.len()];
-
-    print!("  {} Power + Futility... ", method_name);
-    io::stdout().flush().unwrap();
-    let pb_interval = (n_sims / 20).max(1);
-
-    for sim in 0..n_sims {
-        if sim % pb_interval == 0 { print!("."); io::stdout().flush().unwrap(); }
-
-        let mut stop_n: Option<usize> = None;
-        let mut effect_at_stop = 0.0;
-        let mut min_wealth = 1.0f64;
-        let mut outcomes: Vec<(f64, bool)> = Vec::with_capacity(n_pts);
-        let mut all_outcomes: Vec<f64> = Vec::with_capacity(n_pts); // for running median
-
-        // Agnostic tracker
-        let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
-        let mut agnostic_stopped = false;
-
-        let is_sample = sample_indices.contains(&sim);
-        let mut step_idx = 0;
-
-        if method == Method::LinearERT {
-            let mut proc = LinearERTProcess::new(burn_in, ramp, min_val, max_val);
-
-            for i in 1..=n_pts {
-                let is_trt = rng.gen_bool(0.5);
-
-                // Sample outcome based on distribution
-                let outcome = match distribution {
-                    Distribution::VFDMixture => {
-                        let vfd = vfd_params.unwrap();
-                        let (p_death, surv_mean) = if is_trt {
-                            (vfd.p_death_trt, vfd.survivor_mean_trt)
-                        } else {
-                            (vfd.p_death_ctrl, vfd.survivor_mean_ctrl)
-                        };
-                        sample_vfd(rng, p_death, surv_mean, vfd.max_val)
-                    }
-                    Distribution::Normal => {
-                        let mu = if is_trt { mu_trt } else { mu_ctrl };
-                        let z = sample_standard_normal(rng);
-                        (mu + z * sd).clamp(min_val, max_val)
-                    }
-                    Distribution::Uniform => {
-                        let mu = if is_trt { mu_trt } else { mu_ctrl };
-                        ((rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu).clamp(min_val, max_val)
-                    }
-                };
-                outcomes.push((outcome, is_trt));
-
-                proc.update(i, outcome, is_trt);
-                min_wealth = min_wealth.min(proc.wealth);
-                all_outcomes.push(outcome);
-
-                // Agnostic with running median
-                if !agnostic_stopped {
-                    let running_med = if all_outcomes.len() > 1 {
-                        let mut sorted = all_outcomes.clone();
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        sorted[sorted.len() / 2]
-                    } else { outcome };
-                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
-                    if agnostic.observe(signal) { agnostic_stopped = true; }
-                }
-
-                // Track at steps
-                if step_idx < steps.len() && i == steps[step_idx] {
-                    step_vals[step_idx].push(proc.wealth);
-                    if is_sample {
-                        let idx = sample_indices.iter().position(|&x| x == sim).unwrap();
-                        sample_trajs[idx].push(proc.wealth);
-                    }
-                    step_idx += 1;
-                }
-
-                if stop_n.is_none() && proc.wealth > threshold {
-                    stop_n = Some(i);
-                    effect_at_stop = proc.current_effect();
-                }
-            }
-
-            let effect_final = proc.current_effect();
-            let t_significant = t_test_significant(&outcomes, alpha);
-            trials.push(Trial { stop_n, effect_at_stop, effect_final, min_wealth, t_significant, agnostic_stopped });
-        } else {
-            let mut proc = MADProcess::new(burn_in, ramp, c_max);
-
-            for i in 1..=n_pts {
-                let is_trt = rng.gen_bool(0.5);
-                let mu = if is_trt { mu_trt } else { mu_ctrl };
-
-                // Sample outcome (MAD is unbounded, so Normal or Uniform)
-                let outcome = match distribution {
-                    Distribution::Normal | Distribution::VFDMixture => {
-                        mu + sample_standard_normal(rng) * sd
-                    }
-                    Distribution::Uniform => {
-                        rng.gen::<f64>() * sd * 2.0 - sd + mu
-                    }
-                };
-                outcomes.push((outcome, is_trt));
-
-                proc.update(i, outcome, is_trt);
-                min_wealth = min_wealth.min(proc.wealth);
-                all_outcomes.push(outcome);
-
-                // Agnostic with running median
-                if !agnostic_stopped {
-                    let running_med = if all_outcomes.len() > 1 {
-                        let mut sorted = all_outcomes.clone();
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        sorted[sorted.len() / 2]
-                    } else { outcome };
-                    let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
-                    if agnostic.observe(signal) { agnostic_stopped = true; }
-                }
-
-                // Track at steps
-                if step_idx < steps.len() && i == steps[step_idx] {
-                    step_vals[step_idx].push(proc.wealth);
-                    if is_sample {
-                        let idx = sample_indices.iter().position(|&x| x == sim).unwrap();
-                        sample_trajs[idx].push(proc.wealth);
-                    }
-                    step_idx += 1;
-                }
-
-                if stop_n.is_none() && proc.wealth > threshold {
-                    stop_n = Some(i);
-                    effect_at_stop = proc.current_effect(sd);
-                }
-            }
-
-            let effect_final = proc.current_effect(sd);
-            let t_significant = t_test_significant(&outcomes, alpha);
-            trials.push(Trial { stop_n, effect_at_stop, effect_final, min_wealth, t_significant, agnostic_stopped });
-        }
-    }
-    println!(" done");
-
-    // Compute percentiles
-    for (i, vals) in step_vals.iter_mut().enumerate() {
-        if vals.is_empty() { continue; }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let n = vals.len();
-        y_lo[i] = vals[(n as f64 * 0.05) as usize];
-        y_med[i] = vals[n / 2];
-        y_hi[i] = vals[((n as f64 * 0.95) as usize).min(n - 1)];
-    }
-
-    let x: Vec<usize> = steps;
-    (trials, sample_trajs, x, y_lo, y_med, y_hi)
-}
-
-fn run_type1<R: Rng + ?Sized>(
-    rng: &mut R, method: Method, n_pts: usize, n_sims: usize,
-    mu_ctrl: f64, sd: f64, min_val: f64, max_val: f64,
-    threshold: f64, burn_in: usize, ramp: usize, c_max: f64,
-    distribution: Distribution, vfd_params: Option<VFDParams>,
-) -> f64 {
-    let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
-    print!("  {} Type I Error... ", method_name);
-    io::stdout().flush().unwrap();
-
-    let mut rejections = 0;
-    for _ in 0..n_sims {
-        if method == Method::LinearERT {
-            let mut proc = LinearERTProcess::new(burn_in, ramp, min_val, max_val);
-            for i in 1..=n_pts {
-                let is_trt = rng.gen_bool(0.5);
-                // Under null, both arms have same distribution (use control params)
-                let outcome = match distribution {
-                    Distribution::VFDMixture => {
-                        let vfd = vfd_params.unwrap();
-                        sample_vfd(rng, vfd.p_death_ctrl, vfd.survivor_mean_ctrl, vfd.max_val)
-                    }
-                    Distribution::Normal => {
-                        (mu_ctrl + sample_standard_normal(rng) * sd).clamp(min_val, max_val)
-                    }
-                    Distribution::Uniform => {
-                        ((rng.gen::<f64>() * 2.0 - 1.0) * sd * 1.5 + mu_ctrl).clamp(min_val, max_val)
-                    }
-                };
-                proc.update(i, outcome, is_trt);
-                if proc.wealth > threshold { rejections += 1; break; }
-            }
-        } else {
-            let mut proc = MADProcess::new(burn_in, ramp, c_max);
-            for i in 1..=n_pts {
-                let is_trt = rng.gen_bool(0.5);
-                let outcome = match distribution {
-                    Distribution::Normal | Distribution::VFDMixture => {
-                        mu_ctrl + sample_standard_normal(rng) * sd
-                    }
-                    Distribution::Uniform => {
-                        rng.gen::<f64>() * sd * 2.0 - sd + mu_ctrl
-                    }
-                };
-                proc.update(i, outcome, is_trt);
-                if proc.wealth > threshold { rejections += 1; break; }
-            }
-        }
-    }
-
-    let type1 = (rejections as f64 / n_sims as f64) * 100.0;
-    println!("{:.2}%", type1);
-    type1
-}
-
-// === HTML REPORT ===
-
-fn build_report(
-    console: &str, method_name: &str, n_pts: usize, _n_sims: usize,
-    threshold: f64, fut_watch: f64,
-    x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64],
-    trajs: &[Vec<f64>], stops: &[f64], min_wealths: &[f64],
-    grid: &[(f64, usize, usize, usize, f64)],
-) -> String {
-    let x_json = format!("{:?}", x);
-    let lo_json = format!("{:?}", y_lo);
-    let med_json = format!("{:?}", y_med);
-    let hi_json = format!("{:?}", y_hi);
-
-    let mut sample_traces = String::new();
-    for traj in trajs.iter().take(30) {
-        sample_traces.push_str(&format!(
-            "{{type:'scatter',mode:'lines',x:{},y:{:?},line:{{color:'rgba(100,100,100,0.3)',width:1}},showlegend:false}},",
-            x_json, traj
-        ));
-    }
-
-    // ECDF for stops
-    let mut sorted_stops = stops.to_vec();
-    sorted_stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let ecdf_x: Vec<f64> = sorted_stops.clone();
-    let ecdf_y: Vec<f64> = (1..=sorted_stops.len()).map(|i| i as f64 / sorted_stops.len() as f64).collect();
-
-    // ECDF for min wealth
-    let mut sorted_mw = min_wealths.to_vec();
-    sorted_mw.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mw_x: Vec<f64> = sorted_mw.clone();
-    let mw_y: Vec<f64> = (1..=sorted_mw.len()).map(|i| i as f64 / sorted_mw.len() as f64).collect();
-
-
-    // Grid line plot data
-    let grid_th: Vec<f64> = grid.iter().map(|(th, _, _, _, _)| *th).collect();
-    let grid_t: Vec<f64> = grid.iter().map(|(_, n_trig, n_t, _, _)| if *n_trig > 0 { (*n_t as f64 / *n_trig as f64) * 100.0 } else { 0.0 }).collect();
-    let grid_e: Vec<f64> = grid.iter().map(|(_, n_trig, _, n_e, _)| if *n_trig > 0 { (*n_e as f64 / *n_trig as f64) * 100.0 } else { 0.0 }).collect();
-
-    format!(r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{} Report</title>
-<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
-<style>
-body{{font-family:system-ui,-apple-system,sans-serif;max-width:1400px;margin:0 auto;padding:20px;background:#fafafa}}
-h1{{color:#1a1a2e}}h2,h3{{color:#16213e}}
-pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overflow-x:auto;font-size:13px}}
-table{{margin:10px 0}}th,td{{padding:8px 12px;text-align:right}}th{{background:#f0f0f0}}
-.plot-container{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}}
-.plot{{background:#fff;border-radius:8px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
-</style></head><body>
-<h1>{} Simulation Report</h1>
-<h2>Console Output</h2>
-<pre>{}</pre>
-<h2>Visualizations</h2>
-<div class="plot-container">
-<div class="plot"><div id="p1" style="height:350px"></div></div>
-<div class="plot"><div id="p2" style="height:350px"></div></div>
-<div class="plot"><div id="p3" style="height:350px"></div></div>
-<div class="plot"><div id="p4" style="height:350px"></div></div>
-<div class="plot"><div id="p5" style="height:350px"></div></div>
-<div class="plot"><div id="p6" style="height:350px"></div></div>
-</div>
-<script>
-Plotly.newPlot('p1',[
-  {{type:'scatter',x:{},y:{},line:{{width:0}},showlegend:false}},
-  {{type:'scatter',x:{},y:{},fill:'tonexty',fillcolor:'rgba(70,130,180,0.3)',line:{{width:0}},showlegend:false}},
-  {{type:'scatter',x:{},y:{},line:{{color:'steelblue',width:2}},name:'Median'}}
-],{{title:'Wealth Trajectory (5-95% CI)',yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},
-shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}}]}});
-Plotly.newPlot('p2',[{}
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Success'}},
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'coral',width:2,dash:'dot'}},name:'Futility'}}
-],{{title:'Sample Trajectories (n=30)',yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}}}});
-Plotly.newPlot('p3',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'steelblue',width:2}}}}],
-{{title:'Stopping Time ECDF',xaxis:{{title:'Patient #'}},yaxis:{{title:'Cumulative Proportion'}}}});
-Plotly.newPlot('p4',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],
-{{title:'Minimum Wealth ECDF',xaxis:{{title:'Min Wealth'}},yaxis:{{title:'Cumulative Proportion'}},
-shapes:[{{type:'line',x0:{},x1:{},y0:0,y1:1,line:{{color:'red',width:1,dash:'dash'}}}}]}});
-Plotly.newPlot('p5',[
-  {{type:'scatter',mode:'lines+markers',x:{:?},y:{:?},name:'t-test+',line:{{color:'steelblue'}}}},
-  {{type:'scatter',mode:'lines+markers',x:{:?},y:{:?},name:'e-RT+',line:{{color:'coral'}}}}
-],{{title:'Recovery Rate by Threshold',xaxis:{{title:'Futility Threshold'}},yaxis:{{title:'% Would Succeed'}}}});
-Plotly.newPlot('p6',[{{type:'histogram',x:{:?},nbinsx:30,marker:{{color:'steelblue'}}}}],
-{{title:'Final Effect Distribution',xaxis:{{title:'Effect Size'}},yaxis:{{title:'Count'}}}});
-</script></body></html>"#,
-        method_name, method_name, console,
-        // p1: CI plot
-        x_json, lo_json, x_json, hi_json, x_json, med_json, threshold, threshold,
-        // p2: sample traces
-        sample_traces, n_pts, threshold, threshold, n_pts, fut_watch, fut_watch,
-        // p3: stop ECDF
-        ecdf_x, ecdf_y,
-        // p4: min wealth ECDF
-        mw_x, mw_y, fut_watch, fut_watch,
-        // p5: grid lines
-        grid_th, grid_t, grid_th, grid_e,
-        // p6: effect histogram
-        stops
-    )
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+    mean + z * sd
 }
 
 // === MAIN ===
 
 pub fn run() {
     println!("\n==========================================");
-    println!("   CONTINUOUS e-RT SIMULATION");
+    println!("   e-RTc SIMULATION (Continuous)");
     println!("==========================================\n");
 
-    let method_choice = get_choice("Select method:", &[
-        "e-RTo (ordinal/bounded, e.g., VFD 0-28)",
-        "e-RTc (continuous/unbounded)",
-    ]);
-    let method = if method_choice == 1 { Method::LinearERT } else { Method::MAD };
-    let method_name = if method == Method::LinearERT { "e-RTo" } else { "e-RTc" };
+    let mu_ctrl: f64 = get_input("Control Mean (e.g., 10): ");
+    let mu_trt: f64 = get_input("Treatment Mean (e.g., 12): ");
+    let sd: f64 = get_input("Standard Deviation (e.g., 8): ");
 
-    // Distribution selection for e-RTo
-    let (distribution, vfd_params) = if method == Method::LinearERT {
-        let dist_choice = get_choice("Outcome distribution:", &[
-            "VFD Mixture (bimodal: mortality spike + survivor distribution)",
-            "Normal",
-            "Uniform",
-        ]);
-        match dist_choice {
-            1 => {
-                println!("\n--- VFD Mixture Parameters ---");
-                let p_death_ctrl: f64 = get_input("Control mortality rate (e.g., 0.30): ");
-                let p_death_trt: f64 = get_input("Treatment mortality rate (e.g., 0.25): ");
-                let survivor_mean_ctrl: f64 = get_input("Control survivor mean VFD (e.g., 18): ");
-                let survivor_mean_trt: f64 = get_input("Treatment survivor mean VFD (e.g., 20): ");
-                let max_val: f64 = get_input("Max VFD (e.g., 28): ");
-                let vfd = VFDParams { p_death_ctrl, p_death_trt, survivor_mean_ctrl, survivor_mean_trt, max_val };
-                (Distribution::VFDMixture, Some(vfd))
-            }
-            2 => (Distribution::Normal, None),
-            _ => (Distribution::Uniform, None),
-        }
-    } else {
-        let dist_choice = get_choice("Outcome distribution:", &["Normal", "Uniform"]);
-        if dist_choice == 1 { (Distribution::Normal, None) } else { (Distribution::Uniform, None) }
-    };
-
-    // Get means (computed from VFD params if mixture)
-    let (mu_ctrl, mu_trt, sd, min_val, max_val) = if distribution == Distribution::VFDMixture {
-        let vfd = vfd_params.unwrap();
-        let (mc, sc) = vfd_mixture_moments(vfd.p_death_ctrl, vfd.survivor_mean_ctrl, vfd.max_val);
-        let (mt, st) = vfd_mixture_moments(vfd.p_death_trt, vfd.survivor_mean_trt, vfd.max_val);
-        let pooled_sd = ((sc.powi(2) + st.powi(2)) / 2.0).sqrt();
-        println!("\nDerived from mixture model:");
-        println!("  Control mean: {:.2}, SD: {:.2}", mc, sc);
-        println!("  Treatment mean: {:.2}, SD: {:.2}", mt, st);
-        println!("  Pooled SD: {:.2}", pooled_sd);
-        (mc, mt, pooled_sd, 0.0, vfd.max_val)
-    } else {
-        let mu_ctrl: f64 = get_input("Control Mean (e.g., 14): ");
-        let mu_trt: f64 = get_input("Treatment Mean (e.g., 18): ");
-        let (min_val, max_val) = if method == Method::LinearERT {
-            (get_input("Min bound (e.g., 0): "), get_input("Max bound (e.g., 28): "))
-        } else { (f64::MIN, f64::MAX) };
-        let sd: f64 = get_input("Standard Deviation (e.g., 8): ");
-        (mu_ctrl, mu_trt, sd, min_val, max_val)
-    };
-
-    let design_effect = if method == Method::LinearERT {
-        (mu_trt - mu_ctrl).abs()
-    } else {
-        ((mu_trt - mu_ctrl) / sd).abs()
-    };
+    let cohen_d = ((mu_trt - mu_ctrl) / sd).abs();
 
     let n_pts = if get_bool("Calculate Sample Size automatically?") {
-        let power: f64 = get_input("Target Power (e.g., 0.90): ");
-        let cohen_d = ((mu_trt - mu_ctrl) / sd).abs();
+        let power: f64 = get_input("Target Power (e.g., 0.80): ");
         let n = calculate_n_continuous(cohen_d, power);
         println!("\nFrequentist N (Power {:.0}%, d={:.2}): {}", power * 100.0, cohen_d, n);
         if get_bool("Add buffer?") {
@@ -597,136 +113,241 @@ pub fn run() {
     };
 
     let n_sims = get_input_usize("Number of simulations (e.g., 2000): ");
-    let threshold: f64 = get_input("Success threshold (default 20): ");
-    let fut_watch: f64 = get_input("Futility watch (default 0.2): ");
+    println!("\nSuccess threshold (1/alpha). Default = 20");
+    let threshold: f64 = get_input("Success threshold: ");
     let seed = get_optional_input("Seed (Enter for random): ");
 
     let burn_in: usize = 20;
     let ramp: usize = 50;
     let c_max: f64 = 0.6;
 
-    // Console output capture
-    let mut console = String::new();
-    console.push_str(&format!("{}\n", chrono_lite()));
-    console.push_str(&format!("\n==========================================\n"));
-    console.push_str(&format!("   PARAMETERS\n"));
-    console.push_str(&format!("==========================================\n"));
-    console.push_str(&format!("Method:      {}\n", method_name));
-    let dist_name = match distribution {
-        Distribution::VFDMixture => "VFD Mixture",
-        Distribution::Normal => "Normal",
-        Distribution::Uniform => "Uniform",
-    };
-    console.push_str(&format!("Distribution: {}\n", dist_name));
-    if let Some(vfd) = vfd_params {
-        console.push_str(&format!("  Ctrl mortality: {:.0}%, survivor mean: {:.1}\n",
-            vfd.p_death_ctrl * 100.0, vfd.survivor_mean_ctrl));
-        console.push_str(&format!("  Trt mortality:  {:.0}%, survivor mean: {:.1}\n",
-            vfd.p_death_trt * 100.0, vfd.survivor_mean_trt));
-    }
-    console.push_str(&format!("Control:     {:.2}\n", mu_ctrl));
-    console.push_str(&format!("Treatment:   {:.2}\n", mu_trt));
-    if method == Method::LinearERT {
-        console.push_str(&format!("Bounds:      [{:.0}, {:.0}]\n", min_val, max_val));
-        console.push_str(&format!("Design Δ:    {:.2}\n", design_effect));
-    } else {
-        console.push_str(&format!("SD:          {:.2}\n", sd));
-        console.push_str(&format!("Cohen's d:   {:.2}\n", design_effect));
-    }
-    console.push_str(&format!("N:           {}\n", n_pts));
-    console.push_str(&format!("Simulations: {}\n", n_sims));
-    console.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, 1.0/threshold));
-    console.push_str(&format!("Futility:    {}\n", fut_watch));
+    println!("\n--- Configuration ---");
+    println!("mu_ctrl={:.2} mu_trt={:.2} SD={:.2} d={:.2} N={} sims={} thresh={}",
+        mu_ctrl, mu_trt, sd, cohen_d, n_pts, n_sims, threshold);
 
     let mut rng: Box<dyn RngCore> = match seed {
-        Some(s) => { console.push_str(&format!("Seed:        {}\n", s)); Box::new(StdRng::seed_from_u64(s)) }
-        None => { console.push_str("Seed:        random\n"); Box::new(rand::thread_rng()) }
+        Some(s) => Box::new(StdRng::seed_from_u64(s)),
+        None => Box::new(rand::thread_rng()),
     };
 
-    println!("\n==========================================");
-    println!("   RUNNING SIMULATIONS");
-    println!("==========================================\n");
+    // === PHASE 1: TYPE I ERROR ===
+    print!("\nPhase 1: Type I Error... ");
+    io::stdout().flush().unwrap();
 
-    // Type I Error
-    let type1 = run_type1(&mut *rng, method, n_pts, n_sims, mu_ctrl, sd, min_val, max_val,
-        threshold, burn_in, ramp, c_max, distribution, vfd_params);
+    let mut null_rej = 0u32;
+    for _ in 0..n_sims {
+        let mut proc = MADProcess::new(burn_in, ramp, c_max);
+        for i in 1..=n_pts {
+            let is_trt = rng.gen_bool(0.5);
+            let outcome = sample_normal(&mut *rng, mu_ctrl, sd); // Both arms same under null
+            proc.update(i, outcome, is_trt);
+            if proc.wealth > threshold { null_rej += 1; break; }
+        }
+    }
+    let type1 = null_rej as f64 / n_sims as f64 * 100.0;
+    println!("{:.2}%", type1);
 
-    // Power simulation
-    let (trials, trajs, x, y_lo, y_med, y_hi) = run_simulation(
-        &mut *rng, method, n_pts, n_sims, mu_ctrl, mu_trt, sd, min_val, max_val,
-        design_effect, threshold, fut_watch, burn_in, ramp, c_max, distribution, vfd_params
-    );
+    // === PHASE 2: POWER ===
+    println!("Phase 2: Power");
+    io::stdout().flush().unwrap();
 
-    // Compute statistics
-    let successes: Vec<&Trial> = trials.iter().filter(|t| t.stop_n.is_some()).collect();
-    let power = (successes.len() as f64 / n_sims as f64) * 100.0;
-    let agn_power = (trials.iter().filter(|t| t.agnostic_stopped).count() as f64 / n_sims as f64) * 100.0;
-    let t_test_power = t_test_power_continuous(mu_trt - mu_ctrl, sd, n_pts, 1.0/threshold) * 100.0;
+    let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
+    let mut sample_trajs: Vec<Vec<f64>> = Vec::with_capacity(30);
+    let alpha = 1.0 / threshold;
 
-    let (avg_stop, avg_eff_stop, avg_eff_final, type_m) = if !successes.is_empty() {
-        let avg_n = successes.iter().map(|t| t.stop_n.unwrap() as f64).sum::<f64>() / successes.len() as f64;
-        let avg_s = successes.iter().map(|t| t.effect_at_stop.abs()).sum::<f64>() / successes.len() as f64;
-        let avg_f = successes.iter().map(|t| t.effect_final.abs()).sum::<f64>() / successes.len() as f64;
-        (avg_n, avg_s, avg_f, if avg_f > 0.0 { avg_s / avg_f } else { 1.0 })
-    } else { (0.0, 0.0, 0.0, 1.0) };
+    let step = 5;
+    let n_points = n_pts / step + 1;
+    let mut all_wealth_at_step: Vec<Vec<f64>> = vec![Vec::with_capacity(n_sims); n_points];
 
-    // Futility grid (single pass)
-    let thresholds = [0.1, 0.2, 0.3, 0.4, 0.5];
-    let mut grid: Vec<(f64, usize, usize, usize, f64)> = thresholds.iter()
-        .map(|&th| (th, 0usize, 0usize, 0usize, 0.0f64)).collect();
+    let progress_interval = 50;
 
-    for t in &trials {
-        for (th, n_trig, n_t, n_e, sum_eff) in &mut grid {
-            if t.min_wealth < *th {
-                *n_trig += 1;
-                if t.t_significant { *n_t += 1; }
-                if t.stop_n.is_some() { *n_e += 1; }
-                *sum_eff += t.effect_final.abs();
+    for sim in 0..n_sims {
+        if sim > 0 && sim % progress_interval == 0 {
+            let pct = sim as f64 / n_sims as f64 * 100.0;
+            print!("\r  [{:>5.1}%] {}/{}     ", pct, sim, n_sims);
+            io::stdout().flush().unwrap();
+        }
+
+        let mut proc = MADProcess::new(burn_in, ramp, c_max);
+        let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
+        let (mut stopped, mut stop_n, mut effect_stop) = (false, None, 0.0);
+        let mut agnostic_stopped = false;
+        let mut min_w = 1.0f64;
+        let mut outcomes: Vec<(f64, bool)> = Vec::with_capacity(n_pts);
+        let mut all_outcomes: Vec<f64> = Vec::with_capacity(n_pts);
+        let mut traj = if sim < 30 { Vec::with_capacity(n_points) } else { Vec::new() };
+
+        if sim < 30 { traj.push(1.0); }
+        all_wealth_at_step[0].push(1.0);
+
+        for i in 1..=n_pts {
+            let is_trt = rng.gen_bool(0.5);
+            let mu = if is_trt { mu_trt } else { mu_ctrl };
+            let outcome = sample_normal(&mut *rng, mu, sd);
+            outcomes.push((outcome, is_trt));
+            all_outcomes.push(outcome);
+
+            proc.update(i, outcome, is_trt);
+            min_w = min_w.min(proc.wealth);
+
+            if i % step == 0 {
+                all_wealth_at_step[i / step].push(proc.wealth);
+                if sim < 30 { traj.push(proc.wealth); }
+            }
+
+            // Agnostic with running median
+            if !agnostic_stopped {
+                let running_med = if all_outcomes.len() > 1 {
+                    let mut sorted = all_outcomes.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    sorted[sorted.len() / 2]
+                } else { outcome };
+                let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
+                if agnostic.observe(signal) { agnostic_stopped = true; }
+            }
+
+            if !stopped && proc.wealth > threshold {
+                stopped = true;
+                stop_n = Some(i);
+                effect_stop = proc.current_effect(sd);
             }
         }
+
+        if sim < 30 { sample_trajs.push(traj); }
+
+        let effect_final = proc.current_effect(sd);
+        let t_significant = t_test_significant(&outcomes, alpha);
+        trials.push(Trial { stop_n, effect_at_stop: effect_stop, effect_final, min_wealth: min_w, t_significant, agnostic_stopped });
+    }
+    print!("\r  [100.0%] {}/{} complete          \n", n_sims, n_sims);
+    io::stdout().flush().unwrap();
+
+    // === STATISTICS ===
+    let successes: Vec<&Trial> = trials.iter().filter(|t| t.stop_n.is_some()).collect();
+    let n_success = successes.len();
+    let power = n_success as f64 / n_sims as f64 * 100.0;
+    let agn_power = trials.iter().filter(|t| t.agnostic_stopped).count() as f64 / n_sims as f64 * 100.0;
+    let t_power = t_test_power_continuous(mu_trt - mu_ctrl, sd, n_pts, alpha) * 100.0;
+
+    let (avg_stop, avg_eff_stop, avg_eff_final, type_m) = if n_success > 0 {
+        let sum_n: f64 = successes.iter().map(|t| t.stop_n.unwrap() as f64).sum();
+        let sum_s: f64 = successes.iter().map(|t| t.effect_at_stop.abs()).sum();
+        let sum_f: f64 = successes.iter().map(|t| t.effect_final.abs()).sum();
+        let n = n_success as f64;
+        (sum_n / n, sum_s / n, sum_f / n, sum_s / sum_f)
+    } else { (0.0, 0.0, 0.0, 1.0) };
+
+    // === CONSOLE OUTPUT ===
+    let mut out = String::with_capacity(2048);
+    out.push_str(&format!("{}\n", chrono_lite()));
+    out.push_str("==========================================\n");
+    out.push_str("   PARAMETERS\n");
+    out.push_str("==========================================\n");
+    out.push_str(&format!("Control:     {:.2}\n", mu_ctrl));
+    out.push_str(&format!("Treatment:   {:.2}\n", mu_trt));
+    out.push_str(&format!("SD:          {:.2}\n", sd));
+    out.push_str(&format!("Cohen's d:   {:.2}\n", cohen_d));
+    out.push_str(&format!("N:           {}\n", n_pts));
+    out.push_str(&format!("Simulations: {}\n", n_sims));
+    out.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, alpha));
+    out.push_str(&format!("Seed:        {}\n", seed.map_or("random".into(), |s| s.to_string())));
+
+    out.push_str("\n==========================================\n");
+    out.push_str("   RESULTS\n");
+    out.push_str("==========================================\n");
+    out.push_str(&format!("Type I Error:  {:.2}%\n\n", type1));
+    out.push_str(&format!("--- Power at N={} ---\n", n_pts));
+    out.push_str(&format!("t-test:    {:.1}%\n", t_power));
+    out.push_str(&format!("e-RTc:     {:.1}%\n", power));
+    out.push_str(&format!("e-RTu:     {:.1}%\n", agn_power));
+
+    if n_success > 0 {
+        out.push_str("\n--- Stopping ---\n");
+        out.push_str(&format!("Avg stop:      {:.0} ({:.0}%)\n", avg_stop, avg_stop / n_pts as f64 * 100.0));
+        out.push_str(&format!("Effect @ stop: {:.2}\n", avg_eff_stop));
+        out.push_str(&format!("Effect @ end:  {:.2}\n", avg_eff_final));
+        out.push_str(&format!("Type M:        {:.2}x\n", type_m));
     }
 
-    // Console results
-    console.push_str(&format!("\n==========================================\n"));
-    console.push_str(&format!("   RESULTS\n"));
-    console.push_str(&format!("==========================================\n"));
-    console.push_str(&format!("Type I Error:  {:.2}%\n", type1));
-    console.push_str(&format!("\n--- Power at N={} ---\n", n_pts));
-    console.push_str(&format!("t-test:    {:.1}%\n", t_test_power));
-    console.push_str(&format!("{}:      {:.1}%\n", method_name, power));
-    console.push_str(&format!("e-RTu:     {:.1}%\n", agn_power));
+    print!("\n{}", out);
+    println!("Generating report...");
 
-    if !successes.is_empty() {
-        console.push_str(&format!("\n--- Stopping ---\n"));
-        console.push_str(&format!("Avg stop:      {:.0} ({:.0}%)\n", avg_stop, avg_stop / n_pts as f64 * 100.0));
-        console.push_str(&format!("Effect @ stop: {:.2}\n", avg_eff_stop));
-        console.push_str(&format!("Effect @ end:  {:.2}\n", avg_eff_final));
-        console.push_str(&format!("Type M:        {:.2}x\n", type_m));
+    // === PREPARE PLOT DATA ===
+    let mut x_pts: Vec<usize> = Vec::new();
+    let mut y_lo: Vec<f64> = Vec::new();
+    let mut y_med: Vec<f64> = Vec::new();
+    let mut y_hi: Vec<f64> = Vec::new();
+
+    for (idx, vals) in all_wealth_at_step.iter_mut().enumerate() {
+        if vals.is_empty() { continue; }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = vals.len();
+        x_pts.push(idx * step);
+        y_lo.push(vals[(n as f64 * 0.025) as usize]);
+        y_med.push(vals[n / 2]);
+        y_hi.push(vals[(n as f64 * 0.975) as usize]);
     }
 
-    console.push_str(&format!("\n--- Futility Grid ---\n"));
-    console.push_str(&format!("{:<10} {:>10} {:>10} {:>10}\n", "Threshold", "Triggered", "t-test+", "e-RT+"));
-    for (th, n_trig, n_t, n_e, _) in &grid {
-        if *n_trig > 0 {
-            let trig_pct = (*n_trig as f64 / n_sims as f64) * 100.0;
-            let t_pct = (*n_t as f64 / *n_trig as f64) * 100.0;
-            let e_pct = (*n_e as f64 / *n_trig as f64) * 100.0;
-            console.push_str(&format!("{:<10.1} {:>9.1}% {:>9.1}% {:>9.1}%\n", th, trig_pct, t_pct, e_pct));
-        }
-    }
+    let stop_times: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
 
-    // Print to console
-    print!("{}", console);
+    let html = build_report(&out, threshold, n_pts, &x_pts, &y_lo, &y_med, &y_hi, &sample_trajs, &stop_times);
 
-    // Generate report
-    println!("\nGenerating report...");
-    let stops: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
-    let min_wealths: Vec<f64> = trials.iter().map(|t| t.min_wealth).collect();
-
-    let html = build_report(&console, method_name, n_pts, n_sims, threshold, fut_watch,
-        &x, &y_lo, &y_med, &y_hi, &trajs, &stops, &min_wealths, &grid);
-
-    let mut file = File::create("continuous_report.html").unwrap();
-    file.write_all(html.as_bytes()).unwrap();
+    File::create("continuous_report.html").unwrap().write_all(html.as_bytes()).unwrap();
     println!("\n>> continuous_report.html");
+}
+
+fn build_report(
+    console: &str, threshold: f64, n_pts: usize,
+    x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64],
+    trajs: &[Vec<f64>], stops: &[f64],
+) -> String {
+    let x_js = format!("{:?}", x);
+
+    let mut traces = String::new();
+    for tr in trajs.iter().take(30) {
+        traces.push_str(&format!(
+            "{{type:'scatter',mode:'lines',x:{},y:{:?},line:{{color:'rgba(100,100,100,0.25)',width:1}},showlegend:false}},",
+            x_js, tr
+        ));
+    }
+
+    let (stop_x, stop_y) = if !stops.is_empty() {
+        let mut s = stops.to_vec();
+        s.sort_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64 * 100.0).collect();
+        (format!("{:?}", s), format!("{:?}", y))
+    } else { ("[]".into(), "[]".into()) };
+
+    format!(r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>e-RTc Report</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:0 auto;padding:20px;background:#fafafa}}
+h1{{color:#1a1a2e}}h2,h3{{color:#16213e}}
+pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overflow-x:auto;font-size:13px}}
+.plot{{background:#fff;border-radius:8px;padding:15px;margin:20px 0;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+</style></head><body>
+<h1>e-RTc Report</h1>
+<h2>Console Output</h2>
+<pre>{}</pre>
+<h2>Visualizations</h2>
+<div class="plot"><div id="p1" style="height:400px"></div></div>
+<div class="plot"><div id="p2" style="height:400px"></div></div>
+<div class="plot"><div id="p3" style="height:400px"></div></div>
+<script>
+Plotly.newPlot('p1',[
+  {{type:'scatter',x:{},y:{:?},line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{:?},fill:'tonexty',fillcolor:'rgba(31,119,180,0.2)',line:{{width:0}},showlegend:false}},
+  {{type:'scatter',x:{},y:{:?},line:{{color:'#1f77b4',width:2}},name:'Median'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',dash:'dash',width:2}}}}],title:'e-Value Envelope (2.5-97.5 percentile)'}});
+Plotly.newPlot('p2',[{}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',dash:'dash',width:2}},name:'Threshold'}}
+],{{yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Patients'}},title:'Sample Trajectories (30 trials)'}});
+Plotly.newPlot('p3',[{{type:'scatter',mode:'lines',x:{},y:{},line:{{color:'steelblue',width:2}}}}],{{xaxis:{{title:'Stop (patients)'}},yaxis:{{title:'Cumulative %',range:[0,100]}},title:'Early Stopping ECDF'}});
+</script></body></html>"#,
+        console,
+        x_js, y_lo, x_js, y_hi, x_js, y_med, threshold, threshold,
+        traces, n_pts, threshold, threshold,
+        stop_x, stop_y
+    )
 }

@@ -23,10 +23,10 @@ The preprint has R code from a previous implementation. This Rust implementation
 | Method | Endpoint | Use Case |
 |--------|----------|----------|
 | e-RT | Binary | Response rates, mortality |
-| e-RTo | Continuous (bounded) | Ventilator-free days, pain scores |
-| e-RTc | Continuous (unbounded) | Biomarkers, lab values |
+| e-RTc | Continuous | Biomarkers, lab values, any continuous outcome |
 | e-RTs | Time-to-event | Overall survival, PFS |
 | e-RTms | Multi-state | ICU trajectories (Dead/ICU/Ward/Home) |
+| e-RTu | Universal | Domain-agnostic (good/bad signals) |
 
 e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
 
