@@ -5,11 +5,9 @@ use std::fs::File;
 use std::io::Write;
 use csv::ReaderBuilder;
 use serde::Deserialize;
-// rand no longer needed - FutilityMonitor uses internal RNG
 
 use crate::ert_core::{
     get_input, get_input_usize, get_bool, get_string, chrono_lite, BinaryERTProcess,
-    FutilityMonitor, FutilityConfig,
 };
 
 // === DATA STRUCTURES ===
@@ -21,13 +19,6 @@ struct CsvRowRaw {
     _index: Option<String>,
     treatment: String,
     outcome: String,
-}
-
-#[derive(Clone)]
-struct DesignParams {
-    control_rate: f64,
-    _treatment_rate: f64,
-    design_arr: f64,
 }
 
 struct AnalysisResult {
@@ -45,10 +36,6 @@ struct AnalysisResult {
     type_m: Option<f64>,
     final_evalue: f64,
     trajectory: Vec<f64>,
-    futility_summary: Option<String>,
-    futility_recommended_stop: bool,
-    futility_worst_ratio: Option<f64>,
-    design: Option<DesignParams>,
 }
 
 // === CLI ===
@@ -86,12 +73,12 @@ pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<d
     println!("Burn-in: {}  Ramp: {}  Threshold: {}", burn_in, ramp, threshold);
 
     println!("\n--- Running Analysis ---");
-    let result = analyze(&data, burn_in, ramp, threshold, None, None);
+    let result = analyze(&data, burn_in, ramp, threshold);
 
-    print_results(&result, threshold, None);
+    print_results(&result, threshold);
 
     if opts.generate_report {
-        let html = build_report(&result, csv_path, burn_in, ramp, threshold, None);
+        let html = build_report(&result, csv_path, burn_in, ramp, threshold);
         File::create("binary_analysis_report.html")?.write_all(html.as_bytes())?;
         println!("\n>> Saved: binary_analysis_report.html");
     }
@@ -133,26 +120,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let ramp = get_input_usize("Ramp (default 100): ");
     let threshold: f64 = get_input("Success threshold (default 20): ");
 
-    let (fut_thresh, design) = if get_bool("Enable futility monitoring?") {
-        let fut: f64 = get_input("Futility threshold (e.g., 0.5): ");
-        println!("\n--- Design Assumptions ---");
-        let p_ctrl: f64 = get_input("Design control rate (e.g., 0.30): ");
-        let p_trt: f64 = get_input("Design treatment rate (e.g., 0.20): ");
-        let arr = (p_ctrl - p_trt).abs();
-        println!("Design ARR: {:.1}%", arr * 100.0);
-        (Some(fut), Some(DesignParams { control_rate: p_ctrl, _treatment_rate: p_trt, design_arr: arr }))
-    } else {
-        (None, None)
-    };
-
     println!("\n--- Running Analysis ---");
-    let result = analyze(&data, burn_in, ramp, threshold, fut_thresh, design);
+    let result = analyze(&data, burn_in, ramp, threshold);
 
     // Print results
-    print_results(&result, threshold, fut_thresh);
+    print_results(&result, threshold);
 
     if get_bool("\nGenerate HTML report?") {
-        let html = build_report(&result, &csv_path, burn_in, ramp, threshold, fut_thresh);
+        let html = build_report(&result, &csv_path, burn_in, ramp, threshold);
         File::create("binary_analysis_report.html")?.write_all(html.as_bytes())?;
         println!("\n>> binary_analysis_report.html");
     }
@@ -188,7 +163,6 @@ fn read_csv(path: &str) -> Result<Vec<(u8, u8)>, Box<dyn Error>> {
 
 fn analyze(
     data: &[(u8, u8)], burn_in: usize, ramp: usize, threshold: f64,
-    _fut_thresh: Option<f64>, design: Option<DesignParams>,
 ) -> AnalysisResult {
     let n_total = data.len();
     let mut proc = BinaryERTProcess::new(burn_in, ramp);
@@ -198,19 +172,6 @@ fn analyze(
     let mut crossed_at = None;
     let mut risk_diff_at_cross = None;
     let mut or_at_cross = None;
-
-    // Create FutilityMonitor if design params available
-    let mut fut_monitor = design.as_ref().map(|d| {
-        FutilityMonitor::new(
-            FutilityConfig::default(),
-            d.design_arr,
-            d.control_rate,
-            n_total,
-            threshold,
-            burn_in,
-            ramp,
-        )
-    });
 
     for (i, &(treatment, outcome)) in data.iter().enumerate() {
         let patient = i + 1;
@@ -222,13 +183,6 @@ fn analyze(
             crossed_at = Some(patient);
             risk_diff_at_cross = Some(proc.current_risk_diff());
             or_at_cross = Some(proc.current_odds_ratio());
-        }
-
-        // Futility monitoring - pass current process state for accurate forward simulation
-        if let Some(ref mut monitor) = fut_monitor {
-            if monitor.should_check(patient) {
-                monitor.check(patient, proc.wealth, proc.n_trt, proc.events_trt, proc.n_ctrl, proc.events_ctrl);
-            }
         }
     }
 
@@ -243,27 +197,16 @@ fn analyze(
         if rd_f > 0.0 { Some(rd_c / rd_f) } else { None }
     } else { None };
 
-    // Extract futility results
-    let (fut_summary, fut_stop, fut_ratio) = if let Some(monitor) = fut_monitor {
-        (Some(monitor.summary()), monitor.ever_recommended_stop(), monitor.worst_ratio())
-    } else {
-        (None, false, None)
-    };
-
     AnalysisResult {
         n_total, n_trt, n_ctrl, crossed, crossed_at, risk_diff_at_cross, or_at_cross,
         final_risk_diff: final_rd, final_or, rate_trt, rate_ctrl, type_m,
         final_evalue: proc.wealth, trajectory,
-        futility_summary: fut_summary,
-        futility_recommended_stop: fut_stop,
-        futility_worst_ratio: fut_ratio,
-        design,
     }
 }
 
 // === CONSOLE OUTPUT ===
 
-fn print_results(r: &AnalysisResult, threshold: f64, fut_thresh: Option<f64>) {
+fn print_results(r: &AnalysisResult, threshold: f64) {
     println!("\n==========================================");
     println!("   RESULTS");
     println!("==========================================");
@@ -273,8 +216,6 @@ fn print_results(r: &AnalysisResult, threshold: f64, fut_thresh: Option<f64>) {
     println!("Threshold: {:.1}", threshold);
     if r.crossed {
         println!("Status:    CROSSED at patient {}", r.crossed_at.unwrap());
-    } else if let Some(f) = fut_thresh {
-        println!("Status:    {}", if r.final_evalue < f { "Below futility" } else { "Did not cross" });
     } else {
         println!("Status:    Did not cross");
     }
@@ -296,24 +237,11 @@ fn print_results(r: &AnalysisResult, threshold: f64, fut_thresh: Option<f64>) {
     println!("\n--- Rates ---");
     println!("Treatment: {:.1}% (n={})", r.rate_trt * 100.0, r.n_trt);
     println!("Control:   {:.1}% (n={})", r.rate_ctrl * 100.0, r.n_ctrl);
-
-    if let Some(ref d) = r.design {
-        println!("\n--- Futility Monitor ---");
-        println!("(Simulation-based, NOT anytime-valid)");
-        println!("Design ARR:       {:.1}%", d.design_arr * 100.0);
-        println!("Stop recommended: {}", if r.futility_recommended_stop { "YES" } else { "No" });
-        if let Some(ratio) = r.futility_worst_ratio {
-            println!("Worst ratio:      {:.2}x design", ratio);
-        }
-        if let Some(ref summary) = r.futility_summary {
-            println!("\n{}", summary);
-        }
-    }
 }
 
 // === HTML REPORT ===
 
-fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize, threshold: f64, fut_thresh: Option<f64>) -> String {
+fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize, threshold: f64) -> String {
     let x: Vec<usize> = (0..=r.n_total).collect();
     let (or, lo, hi) = r.final_or;
 
@@ -328,24 +256,6 @@ fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize,
     } else { String::new() };
 
     let type_m = r.type_m.map_or(String::new(), |t| format!("<tr><td>Type M:</td><td>{:.2}x</td></tr>", t));
-
-    let _fut_line = fut_thresh.map_or(String::new(), |f|
-        format!("{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'orange',dash:'dot'}}}},", f, f));
-
-    let fut_section = if let Some(ref d) = r.design {
-        format!(r#"<h2>Futility Monitor</h2>
-<p><em>Simulation-based decision support, NOT anytime-valid inference.</em></p>
-<table>
-<tr><td>Design ARR:</td><td>{:.1}%</td></tr>
-<tr><td>Stop recommended:</td><td>{}</td></tr>
-<tr><td>Worst ratio:</td><td>{}</td></tr>
-</table>
-<pre>{}</pre>"#,
-            d.design_arr * 100.0,
-            if r.futility_recommended_stop { "<strong style='color:red'>YES</strong>" } else { "No" },
-            r.futility_worst_ratio.map_or("N/A".into(), |w| format!("{:.2}x design", w)),
-            r.futility_summary.as_deref().unwrap_or(""))
-    } else { String::new() };
 
     format!(r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Binary Analysis Report</title>
@@ -383,8 +293,6 @@ table{{margin:10px 0}}td{{padding:4px 12px}}
 {}
 </table>
 
-{}
-
 <h2>e-Value Trajectory</h2>
 <div class="plot"><div id="p1" style="height:400px"></div></div>
 
@@ -396,6 +304,6 @@ shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',da
 </body></html>"#,
         chrono_lite(), csv_path, r.n_total, r.n_trt, r.rate_trt * 100.0, r.n_ctrl, r.rate_ctrl * 100.0,
         burn_in, ramp, threshold,
-        r.final_evalue, status, crossing, r.final_risk_diff * 100.0, or, lo, hi, type_m, fut_section,
+        r.final_evalue, status, crossing, r.final_risk_diff * 100.0, or, lo, hi, type_m,
         x, r.trajectory, threshold, threshold)
 }

@@ -16,8 +16,7 @@ When wealth exceeds a threshold (e.g., 20 for alpha=0.05), we reject the null. V
 
 **[Read the preprint](https://arxiv.org/abs/2512.04366)**
 
-The preprint has R code from a previous implementation. The Rust implementation has additional features not in the R code (e.g., futility monitoring with calibration).
-R code remains valid.
+The preprint has R code from a previous implementation. This Rust implementation is a rewrite with improved performance and interactive CLI. R code remains valid.
 
 ## Methods
 
@@ -30,14 +29,6 @@ R code remains valid.
 | e-RTms | Multi-state | ICU trajectories (Dead/ICU/Ward/Home) |
 
 e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
-
-## Futility Monitoring
-
-The FutilityMonitor is a simulation-based decision support tool (not an e-process) that estimates P(recovery)—the probability of eventually crossing the success threshold at design effect.
-
-**Survivorship bias correction:** Late estimates are optimistic because trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints. Uses data-driven calibration table (5x5 bins for t × estimate) with shrinkage fallback: `corrected = estimate + (threshold - estimate) × √t`.
-
-When stop is recommended, actual recovery is well below 50%.
 
 ## Quick Start
 

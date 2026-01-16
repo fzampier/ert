@@ -424,13 +424,6 @@ treatment,outcome
 - `Burn-in`: Initial patients before betting starts (default 50)
 - `Ramp`: Gradual increase to full betting (default 100)
 - `Success threshold`: e-value for rejection (default 20)
-- `Futility monitoring`: Optional, tracks recovery probability
-
-**Futility analysis (if enabled):**
-- `Design control rate`: Expected control rate from protocol
-- `Design treatment rate`: Expected treatment rate from protocol
-- Uses FutilityMonitor with default settings (recovery target 10%, stop ratio 1.75x)
-- Reports whether stop was recommended and worst observed ratio
 
 ---
 
@@ -452,10 +445,6 @@ treatment,outcome
 **Methods:**
 - **e-RTo:** Uses bounded formula (requires min/max)
 - **e-RTc:** Uses MAD formula (unbounded)
-
-**Futility analysis:**
-- `Futility threshold`: e.g., 0.5 or 0.9
-- Uses Monte Carlo to find required effect for 50% recovery
 
 ---
 
@@ -605,62 +594,6 @@ Type_M = |effect at crossing| / |effect at final|
 
 Early stopping tends to overestimate effects. Type M quantifies this.
 
-### Futility Monitoring
-
-**IMPORTANT:** The FutilityMonitor is a simulation-based decision support tool, NOT a martingale or e-process. It does not provide anytime-valid inference.
-
-The monitor estimates P(recovery), the probability that the trial will eventually cross the success threshold assuming the true treatment effect equals the design effect.
-
-**Key Parameters:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Recovery target | 10% | Recommend stop if P(recovery) < 10% |
-| Normal interval | 5% of N | Check every 5% of planned enrollment |
-| Alert interval | 1% of N | Switch to frequent checking when in danger zone |
-| Danger threshold | 0.5 | Below this e-value triggers alert mode |
-| Hysteresis | 3 | Consecutive checks above threshold to exit alert mode |
-
-**How it works:**
-
-1. At regular checkpoints, uses Monte Carlo forward simulation to estimate P(recovery) at design effect
-2. Applies survivorship bias correction to late, low estimates
-3. If corrected P(recovery) < recovery_target (default 10%), recommends stopping
-4. Reports ratio = recovery_target / P(recovery) for interpretability
-
-**Survivorship Bias Correction:**
-
-Trials reaching late checkpoints with low P(recovery) have "survived" earlier checkpoints—they weren't flagged earlier, suggesting better underlying prospects than the point-in-time MC estimate implies.
-
-The monitor corrects for this by inflating late, low estimates:
-
-```
-For estimates below threshold when t > 0.1:
-    survivorship_correction = 1 + 6t²
-    corrected_estimate = raw_estimate × survivorship_correction
-```
-
-where t = enrollment fraction (patient / N_total).
-
-| Enrollment (t) | Correction Factor |
-|----------------|-------------------|
-| 25% | 1.4x |
-| 50% | 2.5x |
-| 75% | 4.4x |
-| 100% | 7.0x |
-
-**Practical interpretation:**
-
-- Early estimates (t < 0.1) are not corrected
-- Late, low estimates are inflated to account for survivorship
-- When stop is recommended, actual recovery is well below 50%
-
-Under H0 (no effect):
-- 100% of trials recommended for stop
-- Type I error among stopped trials ~2%
-
-**Limitation:** Uses bidirectional betting, so futility captures scenarios where the e-value is struggling, not specifically "treatment is harmful." A trial with a harmful treatment would still be recommended for futility stopping (which is appropriate).
-
 ---
 
 ## HTML Reports
@@ -673,8 +606,8 @@ All modules generate HTML reports with:
 
 Reports use:
 - Plotly 2.35.0 for interactive plots
-- Standardized styling (system-ui font, 1400px width)
-- Threshold and futility lines on plots
+- Standardized styling (system-ui font, 900px width)
+- Threshold lines on plots
 
 ---
 
@@ -714,10 +647,8 @@ cargo run --release
 
 1. **Bidirectional betting:** e-process detects effects in either direction. A harmful treatment will still cross threshold (just with negative effect).
 
-2. **Futility with bidirectional:** Futility monitoring is weaker than ideal because the process learns direction and bets accordingly.
+2. **e-RTu and survival:** Universal e-process doesn't work for survival outcomes - information is in event timing, not binary signals.
 
-3. **e-RTu and survival:** Universal e-process doesn't work for survival outcomes - information is in event timing, not binary signals.
+3. **No covariate adjustment:** Current implementation uses unadjusted analyses only.
 
-4. **No covariate adjustment:** Current implementation uses unadjusted analyses only.
-
-5. **1:1 randomization assumed:** All modules assume equal allocation to arms.
+4. **1:1 randomization assumed:** All modules assume equal allocation to arms.
