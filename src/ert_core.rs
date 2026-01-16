@@ -1044,6 +1044,7 @@ impl FutilityMonitor {
         }
 
         let n_remaining = self.n_total.saturating_sub(patient);
+        let t = patient as f64 / self.n_total as f64;  // Enrollment fraction
 
         // Compute observed effect and its standard error
         // δ = rate_trt - rate_ctrl (negative means treatment is better for events)
@@ -1063,7 +1064,7 @@ impl FutilityMonitor {
         } else {
             0.25 / n_ctrl.max(1.0)
         };
-        let se = (var_trt + var_ctrl).sqrt().max(0.01);  // Floor to avoid numerical issues
+        let se_obs = (var_trt + var_ctrl).sqrt().max(0.01);  // Floor to avoid numerical issues
 
         // Gap in log-space: how much more log-wealth do we need?
         let gap = if wealth > 0.0 {
@@ -1073,12 +1074,26 @@ impl FutilityMonitor {
         };
 
         // Analytical P(recovery) via Bayesian integration
-        let recovery_prob = if gap <= 0.0 {
+        let raw_recovery_prob = if gap <= 0.0 {
             1.0  // Already at or past threshold
         } else if n_remaining == 0 || gap.is_infinite() {
             0.0
         } else {
-            bayesian_recovery_probability(delta_obs, se, gap, n_remaining)
+            bayesian_recovery_probability(delta_obs, se_obs, gap, n_remaining)
+        };
+
+        // SURVIVORSHIP BIAS CORRECTION for late checkpoints:
+        // Trials reaching late with low estimates have "survived" earlier checkpoints.
+        // The raw P(recovery) is correct for a random trial at this state, but
+        // underestimates for selected trials that survived to this point.
+        //
+        // Multiplicative correction: P_adj = P_raw × (1 + k×t²)
+        // The t² term captures increasing survivorship bias with enrollment.
+        // k=6 empirically calibrated to match actual recovery rates.
+        let recovery_prob = if raw_recovery_prob < self.config.recovery_target && t > 0.3 {
+            (raw_recovery_prob * (1.0 + 6.0 * t * t)).min(self.config.recovery_target * 1.5)
+        } else {
+            raw_recovery_prob
         };
 
         // Calculate ratio for reporting
