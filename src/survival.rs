@@ -114,23 +114,20 @@ fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 
     let mut indices: Vec<usize> = (0..data.time.len()).collect();
     indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
 
-    let (mut events_trt, mut events_ctrl, mut time_trt, mut time_ctrl) = (0.0, 0.0, 0.0, 0.0);
+    let (mut events_trt, mut events_ctrl) = (0.0, 0.0);
     let mut event_count = 0;
 
     for &idx in &indices {
-        if data.treatment[idx] == 1 {
-            time_trt += data.time[idx];
-            if data.status[idx] == 1 { events_trt += 1.0; event_count += 1; }
-        } else {
-            time_ctrl += data.time[idx];
-            if data.status[idx] == 1 { events_ctrl += 1.0; event_count += 1; }
+        if data.status[idx] == 1 {
+            if data.treatment[idx] == 1 { events_trt += 1.0; }
+            else { events_ctrl += 1.0; }
+            event_count += 1;
+            if let Some(max) = max_events { if event_count >= max { break; } }
         }
-        if let Some(max) = max_events { if event_count >= max { break; } }
     }
 
-    let rate_trt = if time_trt > 0.0 { events_trt / time_trt } else { 0.0 };
-    let rate_ctrl = if time_ctrl > 0.0 { events_ctrl / time_ctrl } else { 0.0 };
-    if rate_ctrl > 0.0 { rate_trt / rate_ctrl } else { 1.0 }
+    // Event ratio as HR proxy (assumes 1:1 randomization)
+    if events_ctrl > 0.0 { events_trt / events_ctrl } else { 1.0 }
 }
 
 // === HTML REPORT ===
