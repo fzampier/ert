@@ -34,7 +34,6 @@ struct SurvivalData {
 struct Trial {
     stop_n: Option<usize>,
     hr_at_stop: f64,
-    hr_final: f64,
 }
 
 // === SIMULATE ===
@@ -302,8 +301,7 @@ pub fn run() {
             }
         }
 
-        let hr_final = calculate_observed_hr(&data, None);
-        trials.push(Trial { stop_n, hr_at_stop, hr_final });
+        trials.push(Trial { stop_n, hr_at_stop });
     }
     println!(" done");
 
@@ -327,12 +325,11 @@ pub fn run() {
     let expected_events = (n_pts as f64 * (1.0 - cens_prop)).round() as usize;
     let lr_power = log_rank_power(target_hr, expected_events, 1.0/threshold) * 100.0;
 
-    let (avg_stop, avg_hr_stop, avg_hr_final, type_m) = if !successes.is_empty() {
+    let (avg_stop, avg_hr_stop) = if !successes.is_empty() {
         let avg_n = successes.iter().map(|t| t.stop_n.unwrap() as f64).sum::<f64>() / successes.len() as f64;
         let avg_s = successes.iter().map(|t| t.hr_at_stop).sum::<f64>() / successes.len() as f64;
-        let avg_f = successes.iter().map(|t| t.hr_final).sum::<f64>() / successes.len() as f64;
-        (avg_n, avg_s, avg_f, if avg_f.ln().abs() > 0.001 { avg_s.ln() / avg_f.ln() } else { 1.0 })
-    } else { (0.0, 1.0, 1.0, 1.0) };
+        (avg_n, avg_s)
+    } else { (0.0, 1.0) };
 
     // Console output
     console.push_str("\n==========================================\n");
@@ -345,10 +342,8 @@ pub fn run() {
 
     if !successes.is_empty() {
         console.push_str("\n--- Stopping ---\n");
-        console.push_str(&format!("Avg stop:      {:.0} ({:.0}%)\n", avg_stop, avg_stop / n_pts as f64 * 100.0));
+        console.push_str(&format!("Avg stop:      {:.0} events ({:.0}%)\n", avg_stop, avg_stop / n_pts as f64 * 100.0));
         console.push_str(&format!("HR @ stop:     {:.3}\n", avg_hr_stop));
-        console.push_str(&format!("HR @ end:      {:.3}\n", avg_hr_final));
-        console.push_str(&format!("Type M:        {:.2}x\n", type_m));
     }
 
     print!("{}", console);
