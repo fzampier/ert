@@ -37,7 +37,6 @@ struct AnalysisResult {
     hr_ci: (f64, f64),
     type_m: Option<f64>,
     final_evalue: f64,
-    min_evalue: f64,
     trajectory: Vec<f64>,  // wealth at each event
 }
 
@@ -193,7 +192,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
     let mut event_count: usize = 0;
 
     let mut trajectory: Vec<f64> = vec![1.0];
-    let mut min_wealth: f64 = 1.0;
 
     let mut crossed = false;
     let mut crossed_at: Option<usize> = None;
@@ -243,7 +241,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
 
             cumulative_z += u_i;
             wealth *= multiplier;
-            min_wealth = min_wealth.min(wealth);
 
             // Track events for HR
             if is_trt {
@@ -307,7 +304,6 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
         hr_ci,
         type_m,
         final_evalue: wealth,
-        min_evalue: min_wealth,
         trajectory,
     }
 }
@@ -340,7 +336,6 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
 
     println!("\n--- e-Value ---");
     println!("Final:     {:.4}", r.final_evalue);
-    println!("Minimum:   {:.4}", r.min_evalue);
     println!("Threshold: {:.1}", threshold);
 
     if r.crossed {
@@ -421,7 +416,6 @@ table{{margin:10px 0}}td{{padding:4px 12px}}
 <h2>Results</h2>
 <table>
 <tr><td>Final e-value:</td><td><strong>{:.4}</strong></td></tr>
-<tr><td>Minimum e-value:</td><td>{:.4}</td></tr>
 <tr><td>Status:</td><td>{}</td></tr>
 {}
 <tr><td>Final HR:</td><td>{:.3} ({:.3}-{:.3})</td></tr>
@@ -476,7 +470,6 @@ Plotly.newPlot('p2',[{{
         ramp,
         threshold, 1.0 / threshold,
         r.final_evalue,
-        r.min_evalue,
         status,
         crossing_row,
         r.hr_final, r.hr_ci.0, r.hr_ci.1,

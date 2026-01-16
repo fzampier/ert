@@ -17,8 +17,6 @@ struct Trial {
     stop_n: Option<usize>,
     arr_at_stop: f64,
     arr_final: f64,
-    min_wealth: f64,
-    z_significant: bool,
 }
 
 pub fn run() {
@@ -85,7 +83,8 @@ pub fn run() {
     io::stdout().flush().unwrap();
 
     let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
-    let mut sample_trajs: Vec<Vec<f64>> = Vec::with_capacity(30);
+    let mut pos_trajs: Vec<Vec<f64>> = Vec::new();  // Crossed threshold
+    let mut neg_trajs: Vec<Vec<f64>> = Vec::new();  // Did not cross
     let mut agn_success = 0u32;
     let mut agn_stops: Vec<usize> = Vec::new();
 
@@ -113,10 +112,10 @@ pub fn run() {
         let mut agn = AgnosticERT::new(burn_in, ramp, threshold);
         let (mut stopped, mut stop_n, mut arr_stop) = (false, None, 0.0);
         let mut agn_stopped = false;
-        let mut min_w = 1.0f64;
-        let mut traj = if sim < 30 { Vec::with_capacity(n_patients / step + 1) } else { Vec::new() };
+        let need_traj = pos_trajs.len() < 30 || neg_trajs.len() < 30;
+        let mut traj = if need_traj { Vec::with_capacity(n_patients / step + 1) } else { Vec::new() };
 
-        if sim < 30 { traj.push(1.0); }
+        if need_traj { traj.push(1.0); }
         all_wealth_at_step[0].push(1.0);
 
         for i in 1..=n_patients {
@@ -124,10 +123,9 @@ pub fn run() {
             let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
             proc.update(i, if event { 1.0 } else { 0.0 }, is_trt);
 
-            min_w = min_w.min(proc.wealth);
             if i % step == 0 {
                 all_wealth_at_step[i / step].push(proc.wealth);
-                if sim < 30 { traj.push(proc.wealth); }
+                if need_traj { traj.push(proc.wealth); }
             }
 
             // Agnostic
@@ -145,25 +143,19 @@ pub fn run() {
         }
 
         if agn_stopped { agn_success += 1; }
-        if sim < 30 { sample_trajs.push(traj); }
-
-        // Z-test at end
-        let z_sig = {
-            let (n1, n2) = (proc.n_trt, proc.n_ctrl);
-            if n1 > 0.0 && n2 > 0.0 {
-                let (p1, p2) = (proc.events_trt / n1, proc.events_ctrl / n2);
-                let pp = (proc.events_trt + proc.events_ctrl) / (n1 + n2);
-                let se = (pp * (1.0 - pp) * (1.0/n1 + 1.0/n2)).sqrt();
-                se > 0.0 && (p1 - p2).abs() / se > 1.96
-            } else { false }
-        };
+        // Collect positive/negative trajectories separately
+        if need_traj {
+            if stop_n.is_some() {
+                if pos_trajs.len() < 30 { pos_trajs.push(traj); }
+            } else {
+                if neg_trajs.len() < 30 { neg_trajs.push(traj); }
+            }
+        }
 
         trials.push(Trial {
             stop_n,
             arr_at_stop: arr_stop,
             arr_final: proc.current_risk_diff().abs(),
-            min_wealth: min_w,
-            z_significant: z_sig,
         });
     }
     // Clear progress line and show completion
@@ -187,21 +179,12 @@ pub fn run() {
     let agn_power = agn_success as f64 / n_sims as f64 * 100.0;
     let z_power = z_test_power_binary(p_ctrl, p_trt, n_patients, 1.0 / threshold) * 100.0;
 
-    // Futility grid (single pass)
-    let thresholds = [0.1, 0.2, 0.3, 0.4, 0.5];
-    let mut grid: Vec<(f64, usize, usize, usize, f64)> = thresholds.iter()
-        .map(|&th| (th, 0usize, 0usize, 0usize, 0.0f64)).collect();
-
-    for t in &trials {
-        for (th, n_trig, n_z, n_e, sum_arr) in &mut grid {
-            if t.min_wealth < *th {
-                *n_trig += 1;
-                if t.z_significant { *n_z += 1; }
-                if t.stop_n.is_some() { *n_e += 1; }
-                *sum_arr += t.arr_final;
-            }
-        }
-    }
+    // Build representative sample: proportion of positive samples matches power
+    let n_pos_sample = ((power / 100.0) * 30.0).round() as usize;
+    let n_neg_sample = 30 - n_pos_sample;
+    let mut sample_trajs: Vec<Vec<f64>> = Vec::new();
+    sample_trajs.extend(pos_trajs.into_iter().take(n_pos_sample));
+    sample_trajs.extend(neg_trajs.into_iter().take(n_neg_sample));
 
     // === CONSOLE OUTPUT ===
     let mut out = String::with_capacity(2048);
@@ -262,7 +245,7 @@ pub fn run() {
     let html = build_report(
         &out, threshold, n_patients,
         &x_pts, &y_lo, &y_med, &y_hi, &sample_trajs,
-        &stop_times, &grid, n_sims,
+        &stop_times,
     );
 
     File::create("binary_report.html").unwrap().write_all(html.as_bytes()).unwrap();
@@ -272,7 +255,7 @@ pub fn run() {
 fn build_report(
     console: &str, threshold: f64, n_pts: usize,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64], trajs: &[Vec<f64>],
-    stops: &[f64], grid: &[(f64, usize, usize, usize, f64)], n_sims: usize,
+    stops: &[f64],
 ) -> String {
     let x_js = format!("{:?}", x);
 
@@ -292,18 +275,6 @@ fn build_report(
         let y: Vec<f64> = (1..=s.len()).map(|i| i as f64 / s.len() as f64 * 100.0).collect();
         (format!("{:?}", s), format!("{:?}", y))
     } else { ("[]".into(), "[]".into()) };
-
-    // Grid table
-    let mut grid_tbl = String::from("Thresh | Triggered |  Z-test+  |   e-RT+   | Avg ARR\n");
-    grid_tbl.push_str("-------|-----------|-----------|-----------|--------\n");
-    for &(th, nt, nz, ne, sum) in grid {
-        let (pct_t, pct_z, pct_e, avg) = if nt > 0 {
-            (nt as f64 / n_sims as f64 * 100.0, nz as f64 / nt as f64 * 100.0,
-             ne as f64 / nt as f64 * 100.0, sum / nt as f64 * 100.0)
-        } else { (0.0, 0.0, 0.0, 0.0) };
-        grid_tbl.push_str(&format!(" {:.1}   |   {:5.1}%  |   {:5.1}%  |   {:5.1}%  |  {:4.1}%\n",
-            th, pct_t, pct_z, pct_e, avg));
-    }
 
     format!(r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>e-RT Binary Report</title>

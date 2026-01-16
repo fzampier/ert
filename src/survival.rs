@@ -264,12 +264,12 @@ pub fn run() {
     print!("  Power (HR={:.2})... ", target_hr);
     io::stdout().flush().unwrap();
 
-    let sample_indices: Vec<usize> = (0..30.min(n_sims)).collect();
     let step = (n_pts / 100).max(1);
     let steps: Vec<usize> = (1..=n_pts).filter(|&i| i % step == 0 || i == n_pts).collect();
 
     let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
-    let mut sample_trajs: Vec<Vec<f64>> = vec![Vec::new(); sample_indices.len()];
+    let mut pos_trajs: Vec<Vec<f64>> = Vec::new();  // Crossed threshold
+    let mut neg_trajs: Vec<Vec<f64>> = Vec::new();  // Did not cross
     let mut step_vals: Vec<Vec<f64>> = vec![Vec::with_capacity(n_sims); steps.len()];
 
     let pb_interval = (n_sims / 20).max(1);
@@ -290,14 +290,23 @@ pub fn run() {
             }
         }
 
-        let is_sample = sample_indices.contains(&sim);
+        // Collect trajectory for power-representative sampling
+        let need_traj = pos_trajs.len() < 30 || neg_trajs.len() < 30;
+        if need_traj {
+            let mut traj = Vec::with_capacity(steps.len());
+            for &s in &steps {
+                if s < wealth.len() { traj.push(wealth[s]); }
+            }
+            if stop_n.is_some() {
+                if pos_trajs.len() < 30 { pos_trajs.push(traj); }
+            } else {
+                if neg_trajs.len() < 30 { neg_trajs.push(traj); }
+            }
+        }
+
         for (step_idx, &s) in steps.iter().enumerate() {
             if s < wealth.len() {
                 step_vals[step_idx].push(wealth[s]);
-                if is_sample {
-                    let idx = sample_indices.iter().position(|&x| x == sim).unwrap();
-                    sample_trajs[idx].push(wealth[s]);
-                }
             }
         }
 
@@ -350,6 +359,13 @@ pub fn run() {
 
     println!("\nGenerating report...");
     let stops: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
+
+    // Build representative sample: proportion of positive samples matches power
+    let n_pos_sample = ((power / 100.0) * 30.0).round() as usize;
+    let n_neg_sample = 30 - n_pos_sample;
+    let mut sample_trajs: Vec<Vec<f64>> = Vec::new();
+    sample_trajs.extend(pos_trajs.into_iter().take(n_pos_sample));
+    sample_trajs.extend(neg_trajs.into_iter().take(n_neg_sample));
 
     let html = build_report(&console, n_pts, threshold,
         &steps, &y_lo, &y_med, &y_hi, &sample_trajs, &stops);

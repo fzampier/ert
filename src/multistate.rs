@@ -150,7 +150,6 @@ struct Trial {
     stratified_stop_n: Option<usize>,  // Stratified average e-process
     effect_at_stop: f64,
     effect_final: f64,
-    min_wealth: f64,
     // Transition diagnostics
     n_transitions: usize,
     n_good_trt: usize,
@@ -395,7 +394,6 @@ fn run_single_trial<R: Rng + ?Sized>(
             stratified_stop_n: None,
             effect_at_stop: 0.0,
             effect_final: 0.0,
-            min_wealth: 1.0,
             n_transitions: all_transitions.len(),
             n_good_trt: 0, n_bad_trt: 0, n_good_ctrl: 0, n_bad_ctrl: 0,
             trt_counts, ctrl_counts,
@@ -443,7 +441,6 @@ fn run_single_trial<R: Rng + ?Sized>(
     let stop_n = wealth.iter().position(|&w| w >= threshold);
     let effect_at_stop = stop_n.map(|i| effects[i]).unwrap_or(0.0);
     let effect_final = *effects.last().unwrap_or(&0.0);
-    let min_wealth = wealth.iter().cloned().fold(f64::INFINITY, f64::min);
 
     // Agnostic e-RT in parallel
     let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
@@ -513,7 +510,7 @@ fn run_single_trial<R: Rng + ?Sized>(
     }
 
     (Trial {
-        stop_n, agnostic_stop_n, stratified_stop_n, effect_at_stop, effect_final, min_wealth,
+        stop_n, agnostic_stop_n, stratified_stop_n, effect_at_stop, effect_final,
         n_transitions: n,
         n_good_trt: cnt_good_trt, n_bad_trt: cnt_bad_trt,
         n_good_ctrl: cnt_good_ctrl, n_bad_ctrl: cnt_bad_ctrl,
@@ -540,19 +537,6 @@ fn compute_day_n<R: Rng + ?Sized>(
 
     let n = n_patients as f64;
     counts.iter().map(|&c| c as f64 / n).collect()
-}
-
-// === FUTILITY GRID ===
-
-fn compute_futility_grid(trials: &[Trial], thresholds: &[f64]) -> Vec<(f64, f64, f64)> {
-    thresholds.iter().map(|&thresh| {
-        let triggered: Vec<_> = trials.iter().filter(|t| t.min_wealth < thresh).collect();
-        let n_triggered = triggered.len();
-        let n_recovered = triggered.iter().filter(|t| t.stop_n.is_some()).count();
-        let pct_triggered = 100.0 * n_triggered as f64 / trials.len() as f64;
-        let pct_recovered = if n_triggered > 0 { 100.0 * n_recovered as f64 / n_triggered as f64 } else { 0.0 };
-        (thresh, pct_triggered, pct_recovered)
-    }).collect()
 }
 
 // === INPUT HELPERS ===
@@ -704,10 +688,16 @@ pub fn run() {
 
     println!("\n--- Alternative ---");
     let mut alt_trials = Vec::new();
-    let mut alt_trajectories = Vec::new();
+    let mut alt_pos_trajectories = Vec::new();  // Crossed threshold
+    let mut alt_neg_trajectories = Vec::new();  // Did not cross
     for sim in 0..n_sims {
         let (trial, wealth) = run_single_trial(&mut *rng, n_patients, &p_ctrl, &p_trt, &config, burn_in, ramp, threshold);
-        if alt_trajectories.len() < 30 { alt_trajectories.push(wealth); }
+        // Collect positive and negative separately for power-representative sampling
+        if trial.stratified_stop_n.is_some() {
+            if alt_pos_trajectories.len() < 30 { alt_pos_trajectories.push(wealth); }
+        } else {
+            if alt_neg_trajectories.len() < 30 { alt_neg_trajectories.push(wealth); }
+        }
         alt_trials.push(trial);
         if (sim + 1) % 100 == 0 { print!("\rSimulation {}/{}", sim + 1, n_sims); io::stdout().flush().unwrap(); }
     }
@@ -717,6 +707,13 @@ pub fn run() {
     let alt_strat_success = alt_trials.iter().filter(|t| t.stratified_stop_n.is_some()).count();
     let power_agn = 100.0 * alt_agn_success as f64 / n_sims as f64;
     let power_strat = 100.0 * alt_strat_success as f64 / n_sims as f64;
+
+    // Build representative sample: proportion of positive samples matches power
+    let n_pos_sample = ((power_strat / 100.0) * 30.0).round() as usize;
+    let n_neg_sample = 30 - n_pos_sample;
+    let mut alt_trajectories: Vec<Vec<f64>> = Vec::new();
+    alt_trajectories.extend(alt_pos_trajectories.into_iter().take(n_pos_sample));
+    alt_trajectories.extend(alt_neg_trajectories.into_iter().take(n_neg_sample));
 
     // Type I for stratified
     let null_strat_reject = null_trials.iter().filter(|t| t.stratified_stop_n.is_some()).count();
@@ -742,9 +739,6 @@ pub fn run() {
     let avg_effect_stop = if !effects_at_stop.is_empty() { effects_at_stop.iter().sum::<f64>() / effects_at_stop.len() as f64 } else { 0.0 };
     let avg_effect_final = if !effects_final.is_empty() { effects_final.iter().sum::<f64>() / effects_final.len() as f64 } else { 0.0 };
     let type_m = if avg_effect_final.abs() > 0.001 { avg_effect_stop / avg_effect_final } else { 1.0 };
-
-    // Futility grid
-    let futility_grid = compute_futility_grid(&alt_trials, &[0.1, 0.2, 0.3, 0.4, 0.5]);
 
     // Console output
     let mut console = String::new();
@@ -806,12 +800,6 @@ pub fn run() {
     console.push_str(&format!("Effect at stop:  {:.3}\n", avg_effect_stop));
     console.push_str(&format!("Effect at final: {:.3}\n", avg_effect_final));
     console.push_str(&format!("Type M ratio:    {:.2}x\n\n", type_m));
-
-    console.push_str("--- Futility Grid ---\n");
-    console.push_str("Threshold  Triggered  Recovered\n");
-    for (thresh, triggered, recovered) in &futility_grid {
-        console.push_str(&format!("  {:.1}       {:5.1}%     {:5.1}%\n", thresh, triggered, recovered));
-    }
 
     print!("{}", console);
 

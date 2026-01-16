@@ -150,7 +150,8 @@ impl AgnosticERT {
 
 struct SimResults {
     rejection_rate: f64,
-    trajectories: Vec<Vec<f64>>,
+    pos_trajectories: Vec<Vec<f64>>,  // Crossed threshold
+    neg_trajectories: Vec<Vec<f64>>,  // Did not cross
 }
 
 // === DEMONSTRATION: BINARY SIGNAL GENERATOR ===
@@ -178,7 +179,8 @@ fn run_simulation<R: Rng + ?Sized>(
     threshold: f64,
 ) -> SimResults {
     let mut rejections = 0;
-    let mut trajectories: Vec<Vec<f64>> = Vec::new();
+    let mut pos_trajectories: Vec<Vec<f64>> = Vec::new();
+    let mut neg_trajectories: Vec<Vec<f64>> = Vec::new();
 
     for sim in 0..n_sims {
         let mut ert = AgnosticERT::new(burn_in, ramp, threshold);
@@ -190,12 +192,19 @@ fn run_simulation<R: Rng + ?Sized>(
             }
         }
 
-        if ert.stopped() {
+        let stopped = ert.stopped();
+        if stopped {
             rejections += 1;
         }
 
-        if trajectories.len() < 50 {
-            trajectories.push(ert.history().to_vec());
+        // Collect positive/negative trajectories separately
+        let need_traj = pos_trajectories.len() < 30 || neg_trajectories.len() < 30;
+        if need_traj {
+            if stopped {
+                if pos_trajectories.len() < 30 { pos_trajectories.push(ert.history().to_vec()); }
+            } else {
+                if neg_trajectories.len() < 30 { neg_trajectories.push(ert.history().to_vec()); }
+            }
         }
 
         if (sim + 1) % 100 == 0 {
@@ -207,13 +216,29 @@ fn run_simulation<R: Rng + ?Sized>(
 
     SimResults {
         rejection_rate: rejections as f64 / n_sims as f64,
-        trajectories,
+        pos_trajectories,
+        neg_trajectories,
     }
 }
 
 // === HTML REPORT ===
 
 fn build_html(threshold: f64, null: &SimResults, alt: &SimResults) -> String {
+    // Build representative samples: proportion of positive samples matches rate
+    let null_rate = null.rejection_rate;
+    let n_pos_null = ((null_rate) * 30.0).round() as usize;
+    let n_neg_null = 30 - n_pos_null;
+    let mut null_trajs: Vec<Vec<f64>> = Vec::new();
+    null_trajs.extend(null.pos_trajectories.iter().take(n_pos_null).cloned());
+    null_trajs.extend(null.neg_trajectories.iter().take(n_neg_null).cloned());
+
+    let alt_rate = alt.rejection_rate;
+    let n_pos_alt = ((alt_rate) * 30.0).round() as usize;
+    let n_neg_alt = 30 - n_pos_alt;
+    let mut alt_trajs: Vec<Vec<f64>> = Vec::new();
+    alt_trajs.extend(alt.pos_trajectories.iter().take(n_pos_alt).cloned());
+    alt_trajs.extend(alt.neg_trajectories.iter().take(n_neg_alt).cloned());
+
     format!(
         r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>e-RTu Universal Report</title>
@@ -244,7 +269,7 @@ Plotly.newPlot('p2',t_alt.slice(0,30).map((y,i)=>({{type:'scatter',y:y,line:{{co
   shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 </script></body></html>"#,
         chrono_lite(), null.rejection_rate * 100.0, alt.rejection_rate * 100.0,
-        null.trajectories, alt.trajectories, threshold,
+        null_trajs, alt_trajs, threshold,
     )
 }
 

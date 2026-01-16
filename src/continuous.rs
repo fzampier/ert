@@ -12,70 +12,11 @@ use crate::ert_core::{
 };
 use crate::agnostic::{AgnosticERT, Signal, Arm};
 
-#[allow(dead_code)]
 struct Trial {
     stop_n: Option<usize>,
     effect_at_stop: f64,
     effect_final: f64,
-    min_wealth: f64,
-    t_significant: bool,
     agnostic_stopped: bool,
-}
-
-// === STATISTICS ===
-
-fn t_test_significant(outcomes: &[(f64, bool)], alpha: f64) -> bool {
-    let (mut sum_t, mut ss_t, mut n_t) = (0.0, 0.0, 0.0);
-    let (mut sum_c, mut ss_c, mut n_c) = (0.0, 0.0, 0.0);
-    for &(o, is_trt) in outcomes {
-        if is_trt { sum_t += o; ss_t += o * o; n_t += 1.0; }
-        else { sum_c += o; ss_c += o * o; n_c += 1.0; }
-    }
-    if n_t < 2.0 || n_c < 2.0 { return false; }
-    let mean_t = sum_t / n_t;
-    let mean_c = sum_c / n_c;
-    let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
-    let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
-    let se = (var_t / n_t + var_c / n_c).sqrt();
-    if se < 1e-10 { return false; }
-    let t = (mean_t - mean_c).abs() / se;
-    let df = n_t + n_c - 2.0;
-    let p = 2.0 * (1.0 - t_cdf(t, df));
-    p < alpha
-}
-
-fn t_cdf(t: f64, df: f64) -> f64 {
-    let x = df / (df + t * t);
-    1.0 - 0.5 * incomplete_beta(df / 2.0, 0.5, x)
-}
-
-fn incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
-    if x >= 1.0 { return 1.0; }
-    let mut sum = 0.0;
-    let mut term = 1.0;
-    for n in 0..200 {
-        if n > 0 { term *= (n as f64 - b) * x / n as f64; }
-        let add = term / (a + n as f64);
-        sum += add;
-        if add.abs() < 1e-10 { break; }
-    }
-    x.powf(a) * (1.0 - x).powf(b) * sum / beta(a, b)
-}
-
-fn beta(a: f64, b: f64) -> f64 {
-    (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()
-}
-
-fn gamma_ln(x: f64) -> f64 {
-    let c = [76.18009172947146, -86.50532032941677, 24.01409824083091,
-             -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
-    let mut y = x;
-    let mut tmp = x + 5.5;
-    tmp -= (x + 0.5) * tmp.ln();
-    let mut ser = 1.000000000190015;
-    for &cj in &c { y += 1.0; ser += cj / y; }
-    -tmp + (2.5066282746310005 * ser / x).ln()
 }
 
 fn sample_normal<R: Rng + ?Sized>(rng: &mut R, mean: f64, sd: f64) -> f64 {
@@ -152,7 +93,8 @@ pub fn run() {
     io::stdout().flush().unwrap();
 
     let mut trials: Vec<Trial> = Vec::with_capacity(n_sims);
-    let mut sample_trajs: Vec<Vec<f64>> = Vec::with_capacity(30);
+    let mut pos_trajs: Vec<Vec<f64>> = Vec::new();  // Crossed threshold
+    let mut neg_trajs: Vec<Vec<f64>> = Vec::new();  // Did not cross
     let alpha = 1.0 / threshold;
 
     let step = 5;
@@ -172,27 +114,24 @@ pub fn run() {
         let mut agnostic = AgnosticERT::new(burn_in, ramp, threshold);
         let (mut stopped, mut stop_n, mut effect_stop) = (false, None, 0.0);
         let mut agnostic_stopped = false;
-        let mut min_w = 1.0f64;
-        let mut outcomes: Vec<(f64, bool)> = Vec::with_capacity(n_pts);
         let mut all_outcomes: Vec<f64> = Vec::with_capacity(n_pts);
-        let mut traj = if sim < 30 { Vec::with_capacity(n_points) } else { Vec::new() };
+        let need_traj = pos_trajs.len() < 30 || neg_trajs.len() < 30;
+        let mut traj = if need_traj { Vec::with_capacity(n_points) } else { Vec::new() };
 
-        if sim < 30 { traj.push(1.0); }
+        if need_traj { traj.push(1.0); }
         all_wealth_at_step[0].push(1.0);
 
         for i in 1..=n_pts {
             let is_trt = rng.gen_bool(0.5);
             let mu = if is_trt { mu_trt } else { mu_ctrl };
             let outcome = sample_normal(&mut *rng, mu, sd);
-            outcomes.push((outcome, is_trt));
             all_outcomes.push(outcome);
 
             proc.update(i, outcome, is_trt);
-            min_w = min_w.min(proc.wealth);
 
             if i % step == 0 {
                 all_wealth_at_step[i / step].push(proc.wealth);
-                if sim < 30 { traj.push(proc.wealth); }
+                if need_traj { traj.push(proc.wealth); }
             }
 
             // Agnostic with running median
@@ -213,11 +152,17 @@ pub fn run() {
             }
         }
 
-        if sim < 30 { sample_trajs.push(traj); }
+        // Collect positive/negative trajectories separately
+        if need_traj {
+            if stop_n.is_some() {
+                if pos_trajs.len() < 30 { pos_trajs.push(traj); }
+            } else {
+                if neg_trajs.len() < 30 { neg_trajs.push(traj); }
+            }
+        }
 
         let effect_final = proc.current_effect(sd);
-        let t_significant = t_test_significant(&outcomes, alpha);
-        trials.push(Trial { stop_n, effect_at_stop: effect_stop, effect_final, min_wealth: min_w, t_significant, agnostic_stopped });
+        trials.push(Trial { stop_n, effect_at_stop: effect_stop, effect_final, agnostic_stopped });
     }
     print!("\r  [100.0%] {}/{} complete          \n", n_sims, n_sims);
     io::stdout().flush().unwrap();
@@ -289,6 +234,13 @@ pub fn run() {
     }
 
     let stop_times: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
+
+    // Build representative sample: proportion of positive samples matches power
+    let n_pos_sample = ((power / 100.0) * 30.0).round() as usize;
+    let n_neg_sample = 30 - n_pos_sample;
+    let mut sample_trajs: Vec<Vec<f64>> = Vec::new();
+    sample_trajs.extend(pos_trajs.into_iter().take(n_pos_sample));
+    sample_trajs.extend(neg_trajs.into_iter().take(n_neg_sample));
 
     let html = build_report(&out, threshold, n_pts, &x_pts, &y_lo, &y_med, &y_hi, &sample_trajs, &stop_times);
 
