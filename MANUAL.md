@@ -259,14 +259,20 @@ Cumulative signal drives betting:
 **Intuition:** If more events occur in control than expected under H0, evidence favors treatment.
 
 **Parameters:**
-- `Median survival (control)`: e.g., 12 months
-- `Hazard ratio`: Treatment effect (e.g., 0.7 = 30% reduction)
-- `Enrollment period`: Duration of patient accrual
-- `Follow-up`: Additional follow-up after enrollment ends
-- `Patients`: Total sample size
+- `Target HR`: Hazard ratio to detect (e.g., 0.80 = 20% reduction)
+- `Patients`: Total sample size (can auto-calculate from power)
 - `Simulations`: Monte Carlo runs
+- `Threshold`: e-value threshold (default 20)
+- `Weibull shape/scale`: Distribution parameters for simulation
+- `Censoring proportion`: Fraction censored (0-1)
 
-**Note:** e-RTu (universal) doesn't work well for survival as information is encoded in event timing, not binary good/bad signals.
+**Output:**
+- Type I error rate
+- Power (e-RTs vs log-rank comparison)
+- Average stopping time (events)
+- HR at stopping (event ratio)
+
+**Note:** Type M error is not shown for survival - with complete follow-up, event ratio converges to 1.0 regardless of true HR, making the metric meaningless.
 
 ---
 
@@ -432,11 +438,9 @@ treatment,time,status
 **Output:**
 - e-value trajectory (by event number)
 - HR at crossing (event ratio)
-- Final HR with 95% CI (person-time adjusted)
-- Type M error (effect magnification at early stopping)
 - HTML report with trajectory plots
 
-**Note:** HR at crossing uses event ratio as a simple proxy. Crude person-time HR can be misleading at early interim analyses due to differential follow-up.
+**Note:** HR uses event ratio as a simple proxy (assumes 1:1 randomization).
 
 ---
 
@@ -537,7 +541,7 @@ The key tradeoff:
 
 ### Type M Error
 
-Effect magnification at early stopping:
+Effect magnification at early stopping (binary and continuous endpoints only):
 
 ```
 Type_M = |effect at crossing| / |effect at final|
@@ -547,6 +551,8 @@ Type_M = |effect at crossing| / |effect at final|
 - Type M = 1.5: Effect at stopping was 50% larger than final
 
 Early stopping tends to overestimate effects. Type M quantifies this.
+
+**Note:** Type M is not computed for survival endpoints because with complete follow-up, the event ratio converges to 1.0 regardless of true HR.
 
 ---
 
