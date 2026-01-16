@@ -35,7 +35,6 @@ struct Trial {
     stop_n: Option<usize>,
     hr_at_stop: f64,
     hr_final: f64,
-    min_wealth: f64,
 }
 
 // === SIMULATE ===
@@ -105,8 +104,6 @@ fn compute_e_survival(data: &SurvivalData, burn_in: usize, ramp: usize, lambda_m
         }
 
         // Decrement risk set AFTER using it for p_null calculation.
-        // This matches log-rank semantics: patient is "at risk" at their event/censoring time,
-        // then leaves the risk set. Events update wealth; censored patients only affect risk set.
         if is_trt { risk_trt = (risk_trt - 1).max(0); }
         else { risk_ctrl = (risk_ctrl - 1).max(0); }
     }
@@ -139,10 +136,9 @@ fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 
 // === HTML REPORT ===
 
 fn build_report(
-    console: &str, n_pts: usize, threshold: f64, fut_watch: f64,
+    console: &str, n_pts: usize, threshold: f64,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64],
-    trajs: &[Vec<f64>], stops: &[f64], min_wealths: &[f64],
-    grid: &[(f64, usize, usize, f64)],
+    trajs: &[Vec<f64>], stops: &[f64],
 ) -> String {
     let x_json = format!("{:?}", x);
     let lo_json = format!("{:?}", y_lo);
@@ -162,35 +158,22 @@ fn build_report(
     let ecdf_x: Vec<f64> = sorted_stops.clone();
     let ecdf_y: Vec<f64> = (1..=sorted_stops.len()).map(|i| i as f64 / sorted_stops.len() as f64).collect();
 
-    let mut sorted_mw = min_wealths.to_vec();
-    sorted_mw.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mw_x: Vec<f64> = sorted_mw.clone();
-    let mw_y: Vec<f64> = (1..=sorted_mw.len()).map(|i| i as f64 / sorted_mw.len() as f64).collect();
-
-    let grid_th: Vec<f64> = grid.iter().map(|(th, _, _, _)| *th).collect();
-    let grid_e: Vec<f64> = grid.iter().map(|(_, n_trig, n_e, _)| if *n_trig > 0 { (*n_e as f64 / *n_trig as f64) * 100.0 } else { 0.0 }).collect();
-
     format!(r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>e-RTs Survival Report</title>
 <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
 <style>
-body{{font-family:system-ui,-apple-system,sans-serif;max-width:1400px;margin:0 auto;padding:20px;background:#fafafa}}
+body{{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:0 auto;padding:20px;background:#fafafa}}
 h1{{color:#1a1a2e}}h2,h3{{color:#16213e}}
 pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #ddd;overflow-x:auto;font-size:13px}}
-.plot-container{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}}
-.plot{{background:#fff;border-radius:8px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+.plot{{background:#fff;border-radius:8px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin:20px 0}}
 </style></head><body>
 <h1>e-RTs Survival Report</h1>
 <h2>Console Output</h2>
 <pre>{}</pre>
 <h2>Visualizations</h2>
-<div class="plot-container">
-<div class="plot"><div id="p1" style="height:350px"></div></div>
-<div class="plot"><div id="p2" style="height:350px"></div></div>
-<div class="plot"><div id="p3" style="height:350px"></div></div>
-<div class="plot"><div id="p4" style="height:350px"></div></div>
-<div class="plot"><div id="p5" style="height:350px"></div></div>
-</div>
+<div class="plot"><div id="p1" style="height:400px"></div></div>
+<div class="plot"><div id="p2" style="height:400px"></div></div>
+<div class="plot"><div id="p3" style="height:400px"></div></div>
 <script>
 Plotly.newPlot('p1',[
   {{type:'scatter',x:{},y:{},line:{{width:0}},showlegend:false}},
@@ -199,23 +182,15 @@ Plotly.newPlot('p1',[
 ],{{title:'Wealth Trajectory (5-95% CI)',yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Events'}},
 shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',width:2,dash:'dash'}}}}]}});
 Plotly.newPlot('p2',[{}
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Success'}},
-  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'coral',width:2,dash:'dot'}},name:'Futility'}}
+  {{type:'scatter',x:[0,{}],y:[{},{}],line:{{color:'green',width:2,dash:'dash'}},name:'Threshold'}}
 ],{{title:'Sample Trajectories (n=30)',yaxis:{{type:'log',title:'e-value'}},xaxis:{{title:'Events'}}}});
 Plotly.newPlot('p3',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'steelblue',width:2}}}}],
 {{title:'Stopping Time ECDF',xaxis:{{title:'Event #'}},yaxis:{{title:'Cumulative Proportion'}}}});
-Plotly.newPlot('p4',[{{type:'scatter',mode:'lines',x:{:?},y:{:?},line:{{color:'coral',width:2}}}}],
-{{title:'Minimum Wealth ECDF',xaxis:{{title:'Min Wealth'}},yaxis:{{title:'Cumulative Proportion'}},
-shapes:[{{type:'line',x0:{},x1:{},y0:0,y1:1,line:{{color:'red',width:1,dash:'dash'}}}}]}});
-Plotly.newPlot('p5',[{{type:'scatter',mode:'lines+markers',x:{:?},y:{:?},name:'e-RTs+',line:{{color:'coral'}}}}],
-{{title:'Recovery Rate by Threshold',xaxis:{{title:'Futility Threshold'}},yaxis:{{title:'% Would Succeed'}}}});
 </script></body></html>"#,
         console,
         x_json, lo_json, x_json, hi_json, x_json, med_json, threshold, threshold,
-        sample_traces, n_pts, threshold, threshold, n_pts, fut_watch, fut_watch,
-        ecdf_x, ecdf_y,
-        mw_x, mw_y, fut_watch, fut_watch,
-        grid_th, grid_e
+        sample_traces, n_pts, threshold, threshold,
+        ecdf_x, ecdf_y
     )
 }
 
@@ -244,7 +219,6 @@ pub fn run() {
 
     let n_sims = get_input_usize("Number of simulations (e.g., 2000): ");
     let threshold: f64 = get_input("Success threshold (default 20): ");
-    let fut_watch: f64 = get_input("Futility watch (default 0.2): ");
 
     println!("\nWeibull parameters:");
     let shape: f64 = get_input("Shape (default 1.2): ");
@@ -266,7 +240,6 @@ pub fn run() {
     console.push_str(&format!("N:           {}\n", n_pts));
     console.push_str(&format!("Simulations: {}\n", n_sims));
     console.push_str(&format!("Threshold:   {} (α={:.3})\n", threshold, 1.0/threshold));
-    console.push_str(&format!("Futility:    {}\n", fut_watch));
     console.push_str(&format!("Weibull:     shape={}, scale={}\n", shape, scale));
     console.push_str(&format!("Censoring:   {:.0}%\n", cens_prop * 100.0));
 
@@ -313,10 +286,8 @@ pub fn run() {
 
         let mut stop_n: Option<usize> = None;
         let mut hr_at_stop = 1.0;
-        let mut min_wealth = 1.0f64;
 
         for (i, &w) in wealth.iter().enumerate() {
-            min_wealth = min_wealth.min(w);
             if stop_n.is_none() && w > threshold {
                 stop_n = Some(i);
                 hr_at_stop = calculate_observed_hr(&data, Some(i + 1));
@@ -335,7 +306,7 @@ pub fn run() {
         }
 
         let hr_final = calculate_observed_hr(&data, None);
-        trials.push(Trial { stop_n, hr_at_stop, hr_final, min_wealth });
+        trials.push(Trial { stop_n, hr_at_stop, hr_final });
     }
     println!(" done");
 
@@ -366,21 +337,6 @@ pub fn run() {
         (avg_n, avg_s, avg_f, if avg_f.ln().abs() > 0.001 { avg_s.ln() / avg_f.ln() } else { 1.0 })
     } else { (0.0, 1.0, 1.0, 1.0) };
 
-    // Futility grid
-    let thresholds = [0.1, 0.2, 0.3, 0.4, 0.5];
-    let mut grid: Vec<(f64, usize, usize, f64)> = thresholds.iter()
-        .map(|&th| (th, 0usize, 0usize, 0.0f64)).collect();
-
-    for t in &trials {
-        for (th, n_trig, n_e, sum_hr) in &mut grid {
-            if t.min_wealth < *th {
-                *n_trig += 1;
-                if t.stop_n.is_some() { *n_e += 1; }
-                *sum_hr += t.hr_final;
-            }
-        }
-    }
-
     // Console output
     console.push_str("\n==========================================\n");
     console.push_str("   RESULTS\n");
@@ -398,25 +354,13 @@ pub fn run() {
         console.push_str(&format!("Type M:        {:.2}x\n", type_m));
     }
 
-    console.push_str("\n--- Futility Grid ---\n");
-    console.push_str(&format!("{:<10} {:>10} {:>10} {:>10}\n", "Threshold", "Triggered", "e-RTs+", "Avg HR"));
-    for (th, n_trig, n_e, sum_hr) in &grid {
-        if *n_trig > 0 {
-            let trig_pct = (*n_trig as f64 / n_sims as f64) * 100.0;
-            let e_pct = (*n_e as f64 / *n_trig as f64) * 100.0;
-            let avg_hr = sum_hr / *n_trig as f64;
-            console.push_str(&format!("{:<10.1} {:>9.1}% {:>9.1}% {:>10.3}\n", th, trig_pct, e_pct, avg_hr));
-        }
-    }
-
     print!("{}", console);
 
     println!("\nGenerating report...");
     let stops: Vec<f64> = successes.iter().map(|t| t.stop_n.unwrap() as f64).collect();
-    let min_wealths: Vec<f64> = trials.iter().map(|t| t.min_wealth).collect();
 
-    let html = build_report(&console, n_pts, threshold, fut_watch,
-        &steps, &y_lo, &y_med, &y_hi, &sample_trajs, &stops, &min_wealths, &grid);
+    let html = build_report(&console, n_pts, threshold,
+        &steps, &y_lo, &y_med, &y_hi, &sample_trajs, &stops);
 
     let mut file = File::create("survival_report.html").unwrap();
     file.write_all(html.as_bytes()).unwrap();
