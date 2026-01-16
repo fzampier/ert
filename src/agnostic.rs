@@ -377,11 +377,6 @@ pub fn run() {
     let alt = run_simulation(&mut *rng, n_signals, n_sims, p_trt, p_ctrl, burn_in, ramp, threshold);
     println!("Power: {:.1}%", alt.rejection_rate * 100.0);
 
-    println!("\n--- Type M Error ---");
-    println!("Effect at stop:  {:.3}", alt._avg_effect_at_stop);
-    println!("Effect at final: {:.3}", alt._avg_effect_at_final);
-    println!("Type M ratio:    {:.2}x", alt._type_m);
-
     let html = build_html(n_signals, n_sims, threshold, p_trt, p_ctrl, &null, &alt);
     File::create("agnostic_report.html")
         .unwrap()
