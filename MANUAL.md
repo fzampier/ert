@@ -16,8 +16,8 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTu | 3 | Universal/agnostic | Rate Difference |
 | e-RTs | 4 | Time-to-event (survival) | Hazard-based |
 | e-RTms | 5 | Multi-state (ordinal trajectories) | Proportional OR |
-| Analyze Binary | 6 | Real trial CSV (binary) | RD, OR |
-| Analyze Continuous | 7 | Real trial CSV (continuous) | Cohen's d |
+| Analyze Binary | 6 | Real trial CSV (binary) | RD, OR + anytime-valid CIs |
+| Analyze Continuous | 7 | Real trial CSV (continuous) | Difference, Cohen's d + anytime-valid CIs |
 | Analyze Survival | 8 | Real trial CSV (survival) | HR |
 | Analyze Multi-State | 9 | Real trial CSV (multi-state) | Proportional OR |
 | Stratification Demo | 10 | Why stratification works | - |
@@ -88,6 +88,43 @@ where M_n = lambda_n / 0.5      if patient n is treatment
 **Rejection rule:** Reject H0 when E_n >= 1/alpha (e.g., E >= 20 for alpha = 0.05)
 
 **Type I error guarantee:** P(E_n >= 1/alpha for any n | H0) <= alpha
+
+---
+
+## Anytime-Valid Confidence Sequences
+
+The CSV analysis modules (Analyze Binary, Analyze Continuous) provide **anytime-valid confidence sequences** - confidence intervals that maintain coverage at any stopping time.
+
+**Key property:** Unlike fixed-sample CIs, these remain valid even when you stop based on the data (e.g., at threshold crossing).
+
+**Formula:**
+
+```
+CI = estimate ± crit(n, α) × SE
+
+where crit(n, α) = sqrt(2 × (ln(2/α) + ln(ln(n))))
+```
+
+This uses a time-uniform critical value (Robbins mixture) that grows slowly with n, ensuring coverage regardless of when you stop.
+
+**Available CIs:**
+
+| Module | Effect Measures with CIs |
+|--------|-------------------------|
+| Analyze Binary | Risk Difference, Odds Ratio |
+| Analyze Continuous | Raw Mean Difference, Cohen's d |
+
+**Example output:**
+```
+At crossing (135):
+  Difference: 1.29 (95% CI: -0.06 to 2.63)
+  Cohen's d:  0.489 (95% CI: -0.034 to 1.110)
+Final (500):
+  Difference: 1.08 (95% CI: 0.30 to 1.87)
+  Cohen's d:  0.412 (95% CI: 0.112 to 0.713)
+```
+
+**Note:** CIs are wider than fixed-sample CIs because they pay for sequential validity. The width shrinks as more data accumulates.
 
 ---
 
@@ -367,6 +404,8 @@ Stratification recovers power when patients bounce between non-absorbing states.
 
 **Menu option:** 6
 
+**CLI:** `ert analyze-binary <file.csv> [options]`
+
 **Use case:** Analyze real clinical trial data with binary outcomes.
 
 **CSV format:**
@@ -387,11 +426,21 @@ treatment,outcome
 - `Ramp`: Gradual increase to full betting (default 100)
 - `Success threshold`: e-value for rejection (default 20)
 
+**Output:**
+- e-value trajectory
+- Effect estimates with **anytime-valid 95% CIs**:
+  - Risk Difference (%)
+  - Odds Ratio
+- Results shown at threshold crossing and final
+- HTML report with trajectory plot
+
 ---
 
 ### 7. Analyze Continuous Trial (CSV)
 
 **Menu option:** 7
+
+**CLI:** `ert analyze-continuous <file.csv> [options]`
 
 **Use case:** Analyze real clinical trial data with continuous outcomes.
 
@@ -405,6 +454,21 @@ treatment,outcome
 ```
 
 **Uses e-RTc formula** (MAD-based) applied to real data sequentially.
+
+**Parameters:**
+- `Burn-in`: Initial patients before betting starts (default 50)
+- `Ramp`: Gradual increase to full betting (default 100)
+- `Success threshold`: e-value for rejection (default 20)
+- `c_max`: Maximum betting intensity (default 0.6)
+
+**Output:**
+- e-value trajectory
+- Effect estimates with **anytime-valid 95% CIs**:
+  - Raw Mean Difference (in original units)
+  - Cohen's d (standardized)
+- Group means and pooled SD
+- Results shown at threshold crossing and final
+- HTML report with trajectory plots
 
 ---
 

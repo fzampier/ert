@@ -30,6 +30,13 @@ The preprint has R code from a previous implementation. This Rust implementation
 
 e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
 
+## Features
+
+- **Anytime-valid inference:** Stop whenever you want, Type I error is controlled
+- **Anytime-valid confidence sequences:** CIs that maintain coverage at any stopping time (binary and continuous analysis)
+- **No multiplicity adjustment needed:** Sequential monitoring with built-in error control
+- **HTML reports:** Interactive plots of e-value trajectories
+
 ## Quick Start
 
 ```bash
