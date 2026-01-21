@@ -18,7 +18,7 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTms | 5 | Multi-state (ordinal trajectories) | Proportional OR |
 | Analyze Binary | 6 | Real trial CSV (binary) | RD, OR + anytime-valid CIs |
 | Analyze Continuous | 7 | Real trial CSV (continuous) | Difference, Cohen's d + anytime-valid CIs |
-| Analyze Survival | 8 | Real trial CSV (survival) | HR |
+| Analyze Survival | 8 | Real trial CSV (survival) | HR + anytime-valid CIs |
 | Analyze Multi-State | 9 | Real trial CSV (multi-state) | Proportional OR |
 | Stratification Demo | 10 | Why stratification works | - |
 
@@ -113,6 +113,7 @@ This uses a time-uniform critical value (Robbins mixture) that grows slowly with
 |--------|-------------------------|
 | Analyze Binary | Risk Difference, Odds Ratio |
 | Analyze Continuous | Raw Mean Difference, Cohen's d |
+| Analyze Survival | Hazard Ratio |
 
 **Example output:**
 ```
@@ -501,7 +502,8 @@ treatment,time,status
 
 **Output:**
 - e-value trajectory (by event number)
-- HR at crossing (event ratio)
+- HR with **anytime-valid 95% CI** at crossing and final
+- Warning if HR > 1 (treatment harmful)
 - HTML report with trajectory plots
 
 **Note:** HR uses event ratio as a simple proxy (assumes 1:1 randomization).
@@ -668,7 +670,7 @@ cargo run --release
 
 ## Limitations
 
-1. **Bidirectional betting:** e-process detects effects in either direction. A harmful treatment will still cross threshold (just with negative effect).
+1. **Bidirectional betting:** e-process detects effects in either direction. A harmful treatment will still cross threshold (just with negative effect). The analysis modules now show **warnings** when the effect direction indicates treatment is harmful.
 
 2. **e-RTu and survival:** Universal e-process doesn't work for survival outcomes - information is in event timing, not binary signals.
 

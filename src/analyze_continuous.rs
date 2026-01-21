@@ -257,6 +257,18 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
              r.final_mean_trt, r.final_mean_ctrl, r.final_sd);
     println!("\n  (CIs are anytime-valid confidence sequences)");
 
+    // Bidirectional testing warning
+    if r.crossed {
+        let diff = r.diff_at_cross.unwrap();
+        if diff < 0.0 {
+            println!("\n⚠️  NOTE: Treatment mean LOWER than control (diff < 0).");
+            println!("    If higher values are better, this is evidence AGAINST treatment.");
+            println!("    If lower values are better, this is evidence FOR treatment.");
+        } else {
+            println!("\n    NOTE: Treatment mean HIGHER than control (diff > 0).");
+        }
+    }
+
     if let Some(tm) = r.type_m { println!("\nType M: {:.2}x", tm); }
 }
 

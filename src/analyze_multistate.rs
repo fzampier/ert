@@ -655,6 +655,13 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     println!("Proportional OR:     {:.2}", prop_or);
     println!("Mann-Whitney P(T>C): {:.1}%", mann_whitney * 100.0);
 
+    // Bidirectional testing warning
+    if crossed && prop_or < 1.0 {
+        println!("\n⚠️  WARNING: Proportional OR < 1 (control has better outcomes).");
+        println!("    The e-value crossed threshold but treatment appears HARMFUL.");
+        println!("    This is evidence AGAINST treatment benefit.");
+    }
+
     // Generate report
     if !no_report {
         let result = AnalysisResult {

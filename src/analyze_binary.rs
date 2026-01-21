@@ -251,6 +251,13 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
     println!("  OR:  {:.3} (95% CI: {:.3} to {:.3})", or, or_lo, or_hi);
     println!("\n  (CIs are anytime-valid confidence sequences)");
 
+    // Bidirectional testing warning
+    if r.crossed && r.risk_diff_at_cross.unwrap() < 0.0 {
+        println!("\n⚠️  WARNING: Effect favors CONTROL (RD < 0).");
+        println!("    The e-value crossed threshold but treatment appears HARMFUL.");
+        println!("    This is evidence AGAINST treatment benefit.");
+    }
+
     if let Some(tm) = r.type_m { println!("\nType M: {:.2}x", tm); }
 
     println!("\n--- Rates ---");

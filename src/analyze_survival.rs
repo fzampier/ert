@@ -33,8 +33,9 @@ struct AnalysisResult {
     crossed: bool,
     crossed_at: Option<usize>,  // event number
     hr_at_cross: Option<f64>,
+    hr_ci_at_cross: Option<(f64, f64)>,  // Anytime-valid CI at crossing
     hr_final: f64,
-    hr_ci: (f64, f64),
+    hr_ci_final: (f64, f64),             // Anytime-valid CI at end
     type_m: Option<f64>,
     final_evalue: f64,
     trajectory: Vec<f64>,  // wealth at each event
@@ -196,6 +197,7 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
     let mut crossed = false;
     let mut crossed_at: Option<usize> = None;
     let mut hr_at_cross: Option<f64> = None;
+    let mut hr_ci_at_cross: Option<(f64, f64)> = None;
 
     // Track for HR calculation
     let mut events_trt: f64 = 0.0;
@@ -256,12 +258,12 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
                 crossed = true;
                 crossed_at = Some(event_count);
                 // Use event ratio as simple HR proxy at crossing
-                // (crude rate HR can be misleading for early interim analyses)
-                hr_at_cross = if events_ctrl > 0.0 {
-                    Some(events_trt / events_ctrl)
-                } else {
-                    Some(1.0)
-                };
+                let hr_cross = if events_ctrl > 0.0 { events_trt / events_ctrl } else { 1.0 };
+                hr_at_cross = Some(hr_cross);
+                // Anytime-valid CI at crossing (alpha = 1/threshold)
+                hr_ci_at_cross = Some(anytime_valid_hr_ci(
+                    events_trt as usize, events_ctrl as usize, hr_cross, 1.0 / threshold
+                ));
             }
         }
 
@@ -273,9 +275,9 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
         }
     }
 
-    // Final HR
+    // Final HR with anytime-valid CI
     let hr_final = calculate_hr(events_trt, events_ctrl, time_trt, time_ctrl);
-    let hr_ci = calculate_hr_ci(events_trt as usize, events_ctrl as usize, hr_final);
+    let hr_ci_final = anytime_valid_hr_ci(events_trt as usize, events_ctrl as usize, hr_final, 1.0 / threshold);
 
     // Type M
     let type_m = if crossed {
@@ -300,8 +302,9 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
         crossed,
         crossed_at,
         hr_at_cross,
+        hr_ci_at_cross,
         hr_final,
-        hr_ci,
+        hr_ci_final,
         type_m,
         final_evalue: wealth,
         trajectory,
@@ -314,16 +317,29 @@ fn calculate_hr(events_trt: f64, events_ctrl: f64, time_trt: f64, time_ctrl: f64
     if rate_ctrl > 0.0 { rate_trt / rate_ctrl } else { 1.0 }
 }
 
-fn calculate_hr_ci(events_trt: usize, events_ctrl: usize, hr: f64) -> (f64, f64) {
-    // Approximate CI using 1/sqrt(events)
-    let total_events = events_trt + events_ctrl;
-    if total_events < 2 {
+/// Anytime-valid confidence sequence for hazard ratio
+/// Uses Robbins mixture / time-uniform critical value
+fn anytime_valid_hr_ci(events_trt: usize, events_ctrl: usize, hr: f64, alpha: f64) -> (f64, f64) {
+    let e_t = events_trt as f64;
+    let e_c = events_ctrl as f64;
+    let total_events = e_t + e_c;
+
+    if total_events < 4.0 || e_t < 1.0 || e_c < 1.0 {
         return (0.0, f64::INFINITY);
     }
-    let se_log_hr = ((1.0 / events_trt as f64) + (1.0 / events_ctrl as f64)).sqrt();
+
+    // SE of log(HR) using 1/E approximation
+    let se_log_hr = (1.0 / e_t + 1.0 / e_c).sqrt();
     let log_hr = hr.ln();
-    let lower = (log_hr - 1.96 * se_log_hr).exp();
-    let upper = (log_hr + 1.96 * se_log_hr).exp();
+
+    // Time-uniform critical value (Robbins mixture)
+    // crit = sqrt(2 * (ln(2/alpha) + ln(ln(n))))
+    let log_factor = (2.0 / alpha).ln() + (total_events.ln()).ln().max(0.0);
+    let crit = (2.0 * log_factor).sqrt();
+
+    let margin = crit * se_log_hr;
+    let lower = (log_hr - margin).exp();
+    let upper = (log_hr + margin).exp();
     (lower, upper)
 }
 
@@ -344,13 +360,21 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
         println!("Status:    Did not cross");
     }
 
-    println!("\n--- Hazard Ratio ---");
+    println!("\n--- Hazard Ratio (anytime-valid CI) ---");
     if r.crossed {
+        let ci = r.hr_ci_at_cross.unwrap();
         println!("At crossing ({} events):", r.crossed_at.unwrap());
-        println!("  HR: {:.3}", r.hr_at_cross.unwrap());
+        println!("  HR: {:.3} ({:.3}-{:.3})", r.hr_at_cross.unwrap(), ci.0, ci.1);
     }
     println!("Final ({} events):", r.n_events);
-    println!("  HR: {:.3} ({:.3}-{:.3})", r.hr_final, r.hr_ci.0, r.hr_ci.1);
+    println!("  HR: {:.3} ({:.3}-{:.3})", r.hr_final, r.hr_ci_final.0, r.hr_ci_final.1);
+
+    // Bidirectional testing warning
+    if r.crossed && r.hr_at_cross.unwrap() > 1.0 {
+        println!("\n⚠️  WARNING: Hazard ratio > 1 (more events in treatment).");
+        println!("    The e-value crossed threshold but treatment appears HARMFUL.");
+        println!("    This is evidence AGAINST treatment benefit.");
+    }
 
     if let Some(tm) = r.type_m {
         println!("\nType M: {:.2}x", tm);
@@ -373,7 +397,9 @@ fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize,
     };
 
     let crossing_row = if r.crossed {
-        format!("<tr><td>At crossing:</td><td>HR {:.3}</td></tr>", r.hr_at_cross.unwrap())
+        let ci = r.hr_ci_at_cross.unwrap();
+        format!("<tr><td>At crossing:</td><td>HR {:.3} ({:.3}-{:.3})</td></tr>",
+                r.hr_at_cross.unwrap(), ci.0, ci.1)
     } else {
         String::new()
     };
@@ -472,7 +498,7 @@ Plotly.newPlot('p2',[{{
         r.final_evalue,
         status,
         crossing_row,
-        r.hr_final, r.hr_ci.0, r.hr_ci.1,
+        r.hr_final, r.hr_ci_final.0, r.hr_ci_final.1,
         type_m_row,
         x_events,
         r.trajectory,
