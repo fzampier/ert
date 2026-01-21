@@ -214,6 +214,7 @@ fn calculate_proportional_or(ctrl: &[f64], trt: &[f64]) -> f64 {
     (-mean_log_or).exp()  // Flip for "treatment better" interpretation
 }
 
+#[allow(clippy::needless_range_loop)]
 fn calculate_mann_whitney_prob(ctrl: &[f64], trt: &[f64]) -> f64 {
     let n = ctrl.len();
     let mut p_win = 0.0;
@@ -366,6 +367,7 @@ fn simulate_patient<R: Rng + ?Sized>(
     transitions
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_single_trial<R: Rng + ?Sized>(
     rng: &mut R,
     n_patients: usize,
@@ -543,6 +545,7 @@ fn compute_day_n<R: Rng + ?Sized>(
 
 // === INPUT HELPERS ===
 
+#[allow(clippy::needless_range_loop)]
 fn get_transition_matrix(n_states: usize, name: &str, state_names: &[String], absorbing: &[usize]) -> TransitionMatrix {
     println!("\n--- {} Transition Matrix ---", name);
     println!("Enter probabilities for each row (must sum to 1.0)");

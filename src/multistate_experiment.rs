@@ -134,6 +134,7 @@ struct TrialResult {
     strata_wealth: Vec<Vec<f64>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_stratified_trial<R: Rng + ?Sized>(
     rng: &mut R,
     n_patients: usize,
@@ -429,6 +430,7 @@ fn vec_to_js(v: &[f64]) -> String {
     format!("[{}]", nums.join(","))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_html(
     null_examples: &[TrialResult],
     alt_examples: &[TrialResult],

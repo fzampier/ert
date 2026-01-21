@@ -168,6 +168,7 @@ fn generate_binary_signal<R: Rng + ?Sized>(rng: &mut R, p_trt: f64, p_ctrl: f64)
 
 // === SIMULATION ===
 
+#[allow(clippy::too_many_arguments)]
 fn run_simulation<R: Rng + ?Sized>(
     rng: &mut R,
     n_signals: usize,

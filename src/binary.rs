@@ -254,6 +254,7 @@ pub fn run() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     console: &str, threshold: f64, n_pts: usize,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64], trajs: &[Vec<f64>],

@@ -250,6 +250,7 @@ fn calculate_proportional_or(ctrl_dist: &[f64], trt_dist: &[f64]) -> f64 {
     if denom > 0.0 { numer / denom } else { 1.0 }
 }
 
+#[allow(clippy::needless_range_loop)]
 fn calculate_mann_whitney(ctrl_dist: &[f64], trt_dist: &[f64]) -> f64 {
     let n = ctrl_dist.len();
     let mut prob = 0.0;

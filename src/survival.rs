@@ -131,6 +131,7 @@ fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 
 
 // === HTML REPORT ===
 
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     console: &str, n_pts: usize, threshold: f64,
     x: &[usize], y_lo: &[f64], y_med: &[f64], y_hi: &[f64],
