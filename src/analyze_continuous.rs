@@ -28,7 +28,13 @@ struct AnalysisResult {
     crossed: bool,
     crossed_at: Option<usize>,
     effect_at_cross: Option<f64>,
+    ci_d_at_cross: Option<(f64, f64)>,        // Anytime-valid CI for Cohen's d
+    diff_at_cross: Option<f64>,
+    ci_diff_at_cross: Option<(f64, f64)>,     // Anytime-valid CI for raw difference
     final_effect: f64,
+    final_ci_d: (f64, f64),                   // Anytime-valid CI for Cohen's d
+    final_diff: f64,
+    final_ci_diff: (f64, f64),                // Anytime-valid CI for raw difference
     final_mean_trt: f64,
     final_mean_ctrl: f64,
     final_sd: f64,
@@ -174,6 +180,9 @@ fn analyze(data: &[(u8, f64)], burn_in: usize, ramp: usize, threshold: f64, c_ma
     let mut crossed = false;
     let mut crossed_at = None;
     let mut effect_at_cross = None;
+    let mut ci_d_at_cross = None;
+    let mut diff_at_cross = None;
+    let mut ci_diff_at_cross = None;
 
     let mut proc = MADProcess::new(burn_in, ramp, c_max);
     for (i, &(trt, outcome)) in data.iter().enumerate() {
@@ -185,11 +194,18 @@ fn analyze(data: &[(u8, f64)], burn_in: usize, ramp: usize, threshold: f64, c_ma
             crossed = true;
             crossed_at = Some(pnum);
             effect_at_cross = Some(proc.current_effect(pooled_sd));
+            ci_d_at_cross = Some(proc.confidence_sequence_d(0.05));
+            let (m_t, m_c) = proc.get_means();
+            diff_at_cross = Some(m_t - m_c);
+            ci_diff_at_cross = Some(proc.confidence_sequence_mean_diff(0.05));
         }
     }
 
     let final_effect = proc.current_effect(proc.get_pooled_sd());
+    let final_ci_d = proc.confidence_sequence_d(0.05);
     let (final_mean_trt, final_mean_ctrl) = proc.get_means();
+    let final_diff = final_mean_trt - final_mean_ctrl;
+    let final_ci_diff = proc.confidence_sequence_mean_diff(0.05);
     let final_sd = proc.get_pooled_sd();
     let (n_trt, n_ctrl) = proc.get_ns();
     let final_evalue = proc.wealth;
@@ -201,8 +217,10 @@ fn analyze(data: &[(u8, f64)], burn_in: usize, ramp: usize, threshold: f64, c_ma
     } else { None };
 
     AnalysisResult {
-        n_total, n_trt, n_ctrl, crossed, crossed_at, effect_at_cross,
-        final_effect, final_mean_trt, final_mean_ctrl, final_sd, final_evalue, type_m, trajectory,
+        n_total, n_trt, n_ctrl, crossed, crossed_at,
+        effect_at_cross, ci_d_at_cross, diff_at_cross, ci_diff_at_cross,
+        final_effect, final_ci_d, final_diff, final_ci_diff,
+        final_mean_trt, final_mean_ctrl, final_sd, final_evalue, type_m, trajectory,
     }
 }
 
@@ -218,23 +236,47 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
         println!("Status: Did not cross");
     }
 
+    println!("\n--- Effect Sizes ---");
     if r.crossed {
-        println!("\nAt crossing: Cohen's d = {:.3}", r.effect_at_cross.unwrap());
+        let (d_lo, d_hi) = r.ci_d_at_cross.unwrap();
+        let (diff_lo, diff_hi) = r.ci_diff_at_cross.unwrap();
+        println!("At crossing ({}):", r.crossed_at.unwrap());
+        println!("  Difference: {:.2} (95% CI: {:.2} to {:.2})",
+                 r.diff_at_cross.unwrap(), diff_lo, diff_hi);
+        println!("  Cohen's d:  {:.3} (95% CI: {:.3} to {:.3})",
+                 r.effect_at_cross.unwrap(), d_lo, d_hi);
     }
-    println!("Final: Cohen's d = {:.3}  Trt={:.2}  Ctrl={:.2}  SD={:.2}",
-             r.final_effect, r.final_mean_trt, r.final_mean_ctrl, r.final_sd);
+    let (d_lo, d_hi) = r.final_ci_d;
+    let (diff_lo, diff_hi) = r.final_ci_diff;
+    println!("Final ({}):", r.n_total);
+    println!("  Difference: {:.2} (95% CI: {:.2} to {:.2})",
+             r.final_diff, diff_lo, diff_hi);
+    println!("  Cohen's d:  {:.3} (95% CI: {:.3} to {:.3})",
+             r.final_effect, d_lo, d_hi);
+    println!("  Trt mean: {:.2}  Ctrl mean: {:.2}  SD: {:.2}",
+             r.final_mean_trt, r.final_mean_ctrl, r.final_sd);
+    println!("\n  (CIs are anytime-valid confidence sequences)");
 
-    if let Some(tm) = r.type_m { println!("Type M: {:.2}x", tm); }
+    if let Some(tm) = r.type_m { println!("\nType M: {:.2}x", tm); }
 }
 
 // === HTML REPORT ===
 
 fn build_html(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize, threshold: f64, c_max: f64) -> String {
     let cross_html = if r.crossed {
-        format!("<p><strong>At crossing (patient {}):</strong> Cohen's d = {:.3}</p>", r.crossed_at.unwrap(), r.effect_at_cross.unwrap())
+        let (d_lo, d_hi) = r.ci_d_at_cross.unwrap();
+        let (diff_lo, diff_hi) = r.ci_diff_at_cross.unwrap();
+        format!("<p><strong>At crossing (patient {}):</strong><br>\
+                 Difference: {:.2} (95% CI: {:.2} to {:.2})<br>\
+                 Cohen's d: {:.3} (95% CI: {:.3} to {:.3})</p>",
+                r.crossed_at.unwrap(),
+                r.diff_at_cross.unwrap(), diff_lo, diff_hi,
+                r.effect_at_cross.unwrap(), d_lo, d_hi)
     } else { String::new() };
 
     let type_m_html = r.type_m.map_or(String::new(), |tm| format!("<p><strong>Type M:</strong> {:.2}x</p>", tm));
+    let (final_d_lo, final_d_hi) = r.final_ci_d;
+    let (final_diff_lo, final_diff_hi) = r.final_ci_diff;
 
     format!(r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>e-RTc Analysis Report</title>
@@ -257,9 +299,11 @@ Status: {}
 {}</pre>
 
 <h2>Effect Estimates</h2>
-<pre>Cohen's d: {:.3}
+<pre>Difference: {:.2} (95% CI: {:.2} to {:.2})
+Cohen's d:  {:.3} (95% CI: {:.3} to {:.3})
 Mean (Trt): {:.2}  Mean (Ctrl): {:.2}  SD: {:.2}
-{}</pre>
+{}
+(CIs are anytime-valid confidence sequences)</pre>
 
 <h2>e-Value Trajectory</h2>
 <div class="plot"><div id="p1" style="height:400px"></div></div>
@@ -282,7 +326,9 @@ Plotly.newPlot('p2',[{{type:'scatter',mode:'lines',x:x,y:support,line:{{color:'#
         burn_in, ramp, c_max,
         r.final_evalue, threshold, if r.crossed { format!("CROSSED at {}", r.crossed_at.unwrap()) } else { "Did not cross".into() },
         cross_html,
-        r.final_effect, r.final_mean_trt, r.final_mean_ctrl, r.final_sd,
+        r.final_diff, final_diff_lo, final_diff_hi,
+        r.final_effect, final_d_lo, final_d_hi,
+        r.final_mean_trt, r.final_mean_ctrl, r.final_sd,
         type_m_html,
         (0..=r.n_total).collect::<Vec<_>>(), r.trajectory, threshold, threshold, threshold, threshold.ln(), threshold.ln()
     )

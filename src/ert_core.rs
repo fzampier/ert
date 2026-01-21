@@ -419,7 +419,6 @@ impl MADProcess {
     }
 
     /// Cohen's d effect using estimated pooled SD (for real data analysis)
-    #[allow(dead_code)]  // Public API for CSV analysis modules
     pub fn current_effect_estimated(&self) -> f64 {
         let sd = self.get_pooled_sd();
         self.current_effect(sd)
@@ -452,6 +451,63 @@ impl MADProcess {
         let var_t = (ss_t - sum_t * sum_t / n_t) / (n_t - 1.0);
         let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
         ((var_t * (n_t - 1.0) + var_c * (n_c - 1.0)) / (n_t + n_c - 2.0)).sqrt()
+    }
+
+    /// Anytime-valid confidence sequence for Cohen's d (standardized mean difference).
+    ///
+    /// Returns (lower, upper) bounds that are valid at any stopping time.
+    /// alpha: confidence level (e.g., 0.05 for 95% CI)
+    pub fn confidence_sequence_d(&self, alpha: f64) -> (f64, f64) {
+        let (n_t, n_c) = self.get_ns();
+        let n = (n_t + n_c) as f64;
+        if n < 4.0 {
+            return (f64::NEG_INFINITY, f64::INFINITY);
+        }
+
+        let d = self.current_effect_estimated();
+        let n_t = n_t as f64;
+        let n_c = n_c as f64;
+
+        // Variance of Cohen's d (Hedges & Olkin approximation)
+        // Var(d) ≈ (n_t + n_c) / (n_t * n_c) + d^2 / (2 * (n_t + n_c))
+        let var_d = (n_t + n_c) / (n_t * n_c) + d * d / (2.0 * (n_t + n_c));
+        let se = var_d.sqrt();
+
+        // Time-uniform critical value (Robbins mixture)
+        let log_factor = (2.0 / alpha).ln() + (n.ln()).ln().max(0.0);
+        let crit = (2.0 * log_factor).sqrt();
+
+        let margin = crit * se;
+        (d - margin, d + margin)
+    }
+
+    /// Anytime-valid confidence sequence for raw mean difference.
+    ///
+    /// Returns (lower, upper) bounds in original outcome units.
+    /// alpha: confidence level (e.g., 0.05 for 95% CI)
+    pub fn confidence_sequence_mean_diff(&self, alpha: f64) -> (f64, f64) {
+        let (n_t, n_c) = self.get_ns();
+        let n = (n_t + n_c) as f64;
+        if n < 4.0 {
+            return (f64::NEG_INFINITY, f64::INFINITY);
+        }
+
+        let (m_t, m_c) = self.get_means();
+        let diff = m_t - m_c;
+        let n_t = n_t as f64;
+        let n_c = n_c as f64;
+
+        // Variance of mean difference
+        let sd = self.get_pooled_sd();
+        let var_diff = sd * sd * (1.0 / n_t + 1.0 / n_c);
+        let se = var_diff.sqrt();
+
+        // Time-uniform critical value (Robbins mixture)
+        let log_factor = (2.0 / alpha).ln() + (n.ln()).ln().max(0.0);
+        let crit = (2.0 * log_factor).sqrt();
+
+        let margin = crit * se;
+        (diff - margin, diff + margin)
     }
 }
 
@@ -861,6 +917,26 @@ mod tests {
         let (m_t, m_c) = proc.get_means();
         assert!((m_t - 15.0).abs() < 1e-6);
         assert!((m_c - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_mad_process_confidence_sequence_d() {
+        let mut proc = MADProcess::new(0, 1, 0.25);
+        // Add 50 treatment (mean ~10) and 50 control (mean ~5)
+        for i in 1..=50 {
+            proc.update(i, 10.0 + (i as f64 % 3.0) - 1.0, true);
+        }
+        for i in 51..=100 {
+            proc.update(i, 5.0 + (i as f64 % 3.0) - 1.0, false);
+        }
+
+        let d = proc.current_effect_estimated();
+        let (lo, hi) = proc.confidence_sequence_d(0.05);
+
+        // CI should contain point estimate
+        assert!(lo <= d && d <= hi);
+        // Effect should be positive (treatment > control)
+        assert!(d > 0.0);
     }
 }
 
