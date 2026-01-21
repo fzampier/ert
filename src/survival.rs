@@ -299,8 +299,8 @@ pub fn run() {
             }
             if stop_n.is_some() {
                 if pos_trajs.len() < 30 { pos_trajs.push(traj); }
-            } else {
-                if neg_trajs.len() < 30 { neg_trajs.push(traj); }
+            } else if neg_trajs.len() < 30 {
+                neg_trajs.push(traj);
             }
         }
 

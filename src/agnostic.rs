@@ -202,8 +202,8 @@ fn run_simulation<R: Rng + ?Sized>(
         if need_traj {
             if stopped {
                 if pos_trajectories.len() < 30 { pos_trajectories.push(ert.history().to_vec()); }
-            } else {
-                if neg_trajectories.len() < 30 { neg_trajectories.push(ert.history().to_vec()); }
+            } else if neg_trajectories.len() < 30 {
+                neg_trajectories.push(ert.history().to_vec());
             }
         }
 

@@ -553,7 +553,7 @@ plotTraces('alt_avg', altAvg, 'Alt: Stratified Average (WORKS!)', 'rgba(46,204,1
 
 // Strata plot
 var strataData = [{strata_js}];
-var strataNames = {strata_names_js};
+var strataNames = {strata_names:?};
 var strataColors = ['#e74c3c', '#3498db', '#27ae60'];
 var strataTraces = strataData.map(function(y, i) {{
     return {{ type: 'scatter', y: y, mode: 'lines', name: 'From: ' + strataNames[i],
@@ -579,6 +579,6 @@ Plotly.newPlot('strata', strataTraces, {{
         alt_orig_js = alt_orig_js.join(","),
         alt_avg_js = alt_avg_js.join(","),
         strata_js = strata_js.join(","),
-        strata_names_js = format!("{:?}", strata_names),
+        strata_names = strata_names,
     )
 }

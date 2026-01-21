@@ -414,8 +414,10 @@ fn run_single_trial<R: Rng + ?Sized>(
         // Count for diagnostics
         if is_trt {
             if is_good { cnt_good_trt += 1; } else { cnt_bad_trt += 1; }
+        } else if is_good {
+            cnt_good_ctrl += 1;
         } else {
-            if is_good { cnt_good_ctrl += 1; } else { cnt_bad_ctrl += 1; }
+            cnt_bad_ctrl += 1;
         }
 
         let lambda = if i > burn_in && n_total_trt > 0.0 && n_total_ctrl > 0.0 {
@@ -695,8 +697,8 @@ pub fn run() {
         // Collect positive and negative separately for power-representative sampling
         if trial.stratified_stop_n.is_some() {
             if alt_pos_trajectories.len() < 30 { alt_pos_trajectories.push(wealth); }
-        } else {
-            if alt_neg_trajectories.len() < 30 { alt_neg_trajectories.push(wealth); }
+        } else if alt_neg_trajectories.len() < 30 {
+            alt_neg_trajectories.push(wealth);
         }
         alt_trials.push(trial);
         if (sim + 1) % 100 == 0 { print!("\rSimulation {}/{}", sim + 1, n_sims); io::stdout().flush().unwrap(); }
