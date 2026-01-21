@@ -77,28 +77,6 @@ pub fn get_string(prompt: &str) -> String {
     buffer.trim().to_string()
 }
 
-/// Get choice from numbered options
-#[allow(dead_code)]
-pub fn get_choice(prompt: &str, options: &[&str]) -> usize {
-    loop {
-        println!("{}", prompt);
-        for (i, opt) in options.iter().enumerate() {
-            println!("  {}. {}", i + 1, opt);
-        }
-        print!("Select: ");
-        io::stdout().flush().unwrap();
-        let mut buffer = String::new();
-        if io::stdin().read_line(&mut buffer).is_ok() {
-            if let Ok(num) = buffer.trim().parse::<usize>() {
-                if num >= 1 && num <= options.len() {
-                    return num;
-                }
-            }
-        }
-        println!("Invalid choice.");
-    }
-}
-
 // ============================================================================
 // STATISTICAL HELPERS
 // ============================================================================
@@ -311,7 +289,6 @@ impl BinaryERTProcess {
     /// Uses a mixture martingale approach with boundary crossing.
     ///
     /// alpha: confidence level (e.g., 0.05 for 95% CI)
-    #[allow(dead_code)]  // Public API for CSV analysis modules
     pub fn confidence_sequence_rd(&self, alpha: f64) -> (f64, f64) {
         // Use Wald-type CI with a time-uniform correction factor
         // The correction sqrt(2 * log(2/alpha) / n) ensures anytime validity
@@ -345,7 +322,6 @@ impl BinaryERTProcess {
     ///
     /// Returns (lower, upper) bounds that are valid at any stopping time.
     /// alpha: confidence level (e.g., 0.05 for 95% CI)
-    #[allow(dead_code)]  // Public API for CSV analysis modules
     pub fn confidence_sequence_or(&self, alpha: f64) -> (f64, f64) {
         let n = self.n_trt + self.n_ctrl;
         if n < 4.0 {
@@ -477,104 +453,6 @@ impl MADProcess {
         let var_c = (ss_c - sum_c * sum_c / n_c) / (n_c - 1.0);
         ((var_t * (n_t - 1.0) + var_c * (n_c - 1.0)) / (n_t + n_c - 2.0)).sqrt()
     }
-}
-
-// ============================================================================
-// CALIBRATION TEST
-// ============================================================================
-
-/// Calibration test: verify forward sim matches real e-RT process
-/// Returns (real_power, forward_power) - should be nearly identical
-#[allow(dead_code)]
-pub fn calibration_test(
-    p_ctrl: f64,
-    p_trt: f64,
-    n_total: usize,
-    threshold: f64,
-    burn_in: usize,
-    ramp: usize,
-    n_sims: usize,
-) -> (f64, f64) {
-    use rand::Rng;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    let mut rng = StdRng::seed_from_u64(12345);
-
-    // Method 1: Real e-RT process
-    let mut real_successes = 0;
-    for _ in 0..n_sims {
-        let mut proc = BinaryERTProcess::new(burn_in, ramp);
-        for i in 1..=n_total {
-            let is_trt = rng.gen_bool(0.5);
-            let event = rng.gen_bool(if is_trt { p_trt } else { p_ctrl });
-            proc.update(i, if event { 1.0 } else { 0.0 }, is_trt);
-            if proc.wealth >= threshold {
-                real_successes += 1;
-                break;
-            }
-        }
-    }
-
-    // Method 2: Forward sim logic (standalone, from scratch)
-    let mut rng2 = StdRng::seed_from_u64(12345); // Same seed!
-    let mut forward_successes = 0;
-    for _ in 0..n_sims {
-        let mut wealth = 1.0;
-        let (mut n_t, mut e_t, mut n_c, mut e_c) = (0.0, 0.0, 0.0, 0.0);
-
-        for i in 1..=n_total {
-            let is_trt = rng2.gen_bool(0.5);
-            let event = rng2.gen_bool(if is_trt { p_trt } else { p_ctrl });
-
-            // Delta from CURRENT counts (before this patient)
-            // MUST match real process: default to 0.5 when arm is empty
-            let rate_t = if n_t > 0.0 { e_t / n_t } else { 0.5 };
-            let rate_c = if n_c > 0.0 { e_c / n_c } else { 0.5 };
-            let delta = rate_t - rate_c;
-
-            // Update counts BEFORE wealth update (matches real process order)
-            if is_trt {
-                n_t += 1.0;
-                if event { e_t += 1.0; }
-            } else {
-                n_c += 1.0;
-                if event { e_c += 1.0; }
-            }
-
-            // Ramp factor
-            let c = if i > burn_in {
-                ((i - burn_in) as f64 / ramp as f64).min(1.0)
-            } else {
-                0.0
-            };
-
-            // Only bet if past burn-in
-            if c > 0.0 {
-                // Lambda (must match real process exactly)
-                let lambda = if event {
-                    0.5 + 0.5 * c * delta
-                } else {
-                    0.5 - 0.5 * c * delta
-                };
-                let lambda = lambda.clamp(0.001, 0.999);
-
-                // Wealth update
-                let mult = if is_trt { lambda / 0.5 } else { (1.0 - lambda) / 0.5 };
-                wealth *= mult;
-            }
-
-            if wealth >= threshold {
-                forward_successes += 1;
-                break;
-            }
-        }
-    }
-
-    let real_power = real_successes as f64 / n_sims as f64;
-    let forward_power = forward_successes as f64 / n_sims as f64;
-
-    (real_power, forward_power)
 }
 
 // ============================================================================
@@ -717,5 +595,272 @@ pub fn t_test_power_continuous(effect: f64, sd: f64, n_total: usize, alpha: f64)
 
     // Power = P(|Z| > z_alpha | H1)
     normal_cdf(z_effect - z_alpha)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Median tests ---
+
+    #[test]
+    fn test_median_odd() {
+        assert_eq!(median(&[1.0, 2.0, 3.0]), 2.0);
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0); // unsorted input
+    }
+
+    #[test]
+    fn test_median_even() {
+        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[test]
+    fn test_median_single() {
+        assert_eq!(median(&[42.0]), 42.0);
+    }
+
+    #[test]
+    fn test_median_empty() {
+        assert_eq!(median(&[]), 0.0);
+    }
+
+    // --- MAD tests ---
+
+    #[test]
+    fn test_mad_basic() {
+        // median = 2, deviations = [1, 0, 1], MAD = 1
+        assert_eq!(mad(&[1.0, 2.0, 3.0]), 1.0);
+    }
+
+    #[test]
+    fn test_mad_constant() {
+        // All same values -> MAD = 0
+        assert_eq!(mad(&[5.0, 5.0, 5.0, 5.0]), 0.0);
+    }
+
+    // --- Normal CDF tests ---
+
+    #[test]
+    fn test_normal_cdf_center() {
+        let cdf_0 = normal_cdf(0.0);
+        assert!((cdf_0 - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normal_cdf_known_values() {
+        // P(Z < 1.96) ≈ 0.975
+        let cdf_196 = normal_cdf(1.96);
+        assert!((cdf_196 - 0.975).abs() < 0.001);
+
+        // P(Z < -1.96) ≈ 0.025
+        let cdf_neg196 = normal_cdf(-1.96);
+        assert!((cdf_neg196 - 0.025).abs() < 0.001);
+    }
+
+    // --- Normal quantile tests ---
+
+    #[test]
+    fn test_normal_quantile_center() {
+        let q_50 = normal_quantile(0.5);
+        assert!(q_50.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normal_quantile_known_values() {
+        // Q(0.975) ≈ 1.96
+        let q_975 = normal_quantile(0.975);
+        assert!((q_975 - 1.96).abs() < 0.01);
+
+        // Q(0.025) ≈ -1.96
+        let q_025 = normal_quantile(0.025);
+        assert!((q_025 + 1.96).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_normal_quantile_extremes() {
+        assert!(normal_quantile(0.0).is_infinite());
+        assert!(normal_quantile(1.0).is_infinite());
+    }
+
+    // --- BinaryERTProcess tests ---
+
+    #[test]
+    fn test_binary_ert_initial_state() {
+        let proc = BinaryERTProcess::new(50, 100);
+        assert_eq!(proc.wealth, 1.0);
+        assert_eq!(proc.n_trt, 0.0);
+        assert_eq!(proc.n_ctrl, 0.0);
+    }
+
+    #[test]
+    fn test_binary_ert_counts_update() {
+        let mut proc = BinaryERTProcess::new(50, 100);
+        proc.update(1, 1.0, true);  // treatment, event
+        proc.update(2, 0.0, false); // control, no event
+
+        assert_eq!(proc.n_trt, 1.0);
+        assert_eq!(proc.events_trt, 1.0);
+        assert_eq!(proc.n_ctrl, 1.0);
+        assert_eq!(proc.events_ctrl, 0.0);
+    }
+
+    #[test]
+    fn test_binary_ert_no_betting_during_burnin() {
+        let mut proc = BinaryERTProcess::new(50, 100);
+        for i in 1..=50 {
+            proc.update(i, 1.0, i % 2 == 0);
+        }
+        // During burn-in, wealth should remain 1.0
+        assert_eq!(proc.wealth, 1.0);
+    }
+
+    #[test]
+    fn test_binary_ert_risk_diff() {
+        let mut proc = BinaryERTProcess::new(0, 1);
+        // 2 events in 4 treatment patients = 50%
+        proc.update(1, 1.0, true);
+        proc.update(2, 1.0, true);
+        proc.update(3, 0.0, true);
+        proc.update(4, 0.0, true);
+        // 1 event in 4 control patients = 25%
+        proc.update(5, 1.0, false);
+        proc.update(6, 0.0, false);
+        proc.update(7, 0.0, false);
+        proc.update(8, 0.0, false);
+
+        let rd = proc.current_risk_diff();
+        assert!((rd - 0.25).abs() < 1e-6); // 50% - 25% = 25%
+    }
+
+    #[test]
+    fn test_binary_ert_odds_ratio() {
+        let mut proc = BinaryERTProcess::new(0, 1);
+        // Treatment: 10 events, 10 non-events
+        for _ in 0..10 { proc.n_trt += 1.0; proc.events_trt += 1.0; }
+        for _ in 0..10 { proc.n_trt += 1.0; }
+        // Control: 5 events, 15 non-events
+        for _ in 0..5 { proc.n_ctrl += 1.0; proc.events_ctrl += 1.0; }
+        for _ in 0..15 { proc.n_ctrl += 1.0; }
+
+        let (or, lo, hi) = proc.current_odds_ratio();
+        // OR = (10.5 * 15.5) / (10.5 * 5.5) ≈ 2.82 (with continuity correction)
+        assert!(or > 2.0 && or < 4.0);
+        assert!(lo < or && or < hi);
+    }
+
+    // --- Confidence sequence tests ---
+
+    #[test]
+    fn test_confidence_sequence_rd_bounds() {
+        let mut proc = BinaryERTProcess::new(0, 1);
+        // Add some data
+        for i in 1..=100 {
+            proc.update(i, if i % 3 == 0 { 1.0 } else { 0.0 }, i % 2 == 0);
+        }
+
+        let (lo, hi) = proc.confidence_sequence_rd(0.05);
+        let rd = proc.current_risk_diff();
+
+        // CI should contain point estimate
+        assert!(lo <= rd && rd <= hi);
+        // CI should be within [-1, 1]
+        assert!(lo >= -1.0 && hi <= 1.0);
+    }
+
+    #[test]
+    fn test_confidence_sequence_or_bounds() {
+        let mut proc = BinaryERTProcess::new(0, 1);
+        // Add some data
+        for i in 1..=100 {
+            proc.update(i, if i % 3 == 0 { 1.0 } else { 0.0 }, i % 2 == 0);
+        }
+
+        let (lo, hi) = proc.confidence_sequence_or(0.05);
+        let (or, _, _) = proc.current_odds_ratio();
+
+        // CI should contain point estimate
+        assert!(lo <= or && or <= hi);
+        // CI should be positive
+        assert!(lo >= 0.0);
+    }
+
+    #[test]
+    fn test_confidence_sequence_small_n() {
+        let proc = BinaryERTProcess::new(50, 100);
+        // With no data, should return wide bounds
+        let (rd_lo, rd_hi) = proc.confidence_sequence_rd(0.05);
+        assert_eq!(rd_lo, -1.0);
+        assert_eq!(rd_hi, 1.0);
+
+        let (or_lo, or_hi) = proc.confidence_sequence_or(0.05);
+        assert_eq!(or_lo, 0.0);
+        assert!(or_hi.is_infinite());
+    }
+
+    // --- Sample size calculation tests ---
+
+    #[test]
+    fn test_calculate_n_binary() {
+        // 30% vs 20% should need reasonable N
+        let n = calculate_n_binary(0.30, 0.20, 0.80);
+        assert!(n > 100 && n < 1000);
+    }
+
+    #[test]
+    fn test_calculate_n_continuous() {
+        // Cohen's d = 0.5 (medium effect)
+        let n = calculate_n_continuous(0.5, 0.80);
+        assert!(n > 50 && n < 200);
+    }
+
+    // --- Power calculation tests ---
+
+    #[test]
+    fn test_z_test_power_large_effect() {
+        // Large effect + large N should give high power
+        let power = z_test_power_binary(0.5, 0.2, 200, 0.05);
+        assert!(power > 0.9);
+    }
+
+    #[test]
+    fn test_z_test_power_no_effect() {
+        // No effect should give ~alpha power (type I error)
+        let power = z_test_power_binary(0.3, 0.3, 200, 0.05);
+        assert!(power < 0.1);
+    }
+
+    #[test]
+    fn test_t_test_power() {
+        // Medium effect (d=0.5), N=128 should give ~80% power
+        let power = t_test_power_continuous(0.5, 1.0, 128, 0.05);
+        assert!(power > 0.7 && power < 0.9);
+    }
+
+    // --- MADProcess tests ---
+
+    #[test]
+    fn test_mad_process_initial_state() {
+        let proc = MADProcess::new(50, 100, 0.25);
+        assert_eq!(proc.wealth, 1.0);
+    }
+
+    #[test]
+    fn test_mad_process_means() {
+        let mut proc = MADProcess::new(0, 1, 0.25);
+        // Treatment: 10, 20
+        proc.update(1, 10.0, true);
+        proc.update(2, 20.0, true);
+        // Control: 5, 15
+        proc.update(3, 5.0, false);
+        proc.update(4, 15.0, false);
+
+        let (m_t, m_c) = proc.get_means();
+        assert!((m_t - 15.0).abs() < 1e-6);
+        assert!((m_c - 10.0).abs() < 1e-6);
+    }
 }
 

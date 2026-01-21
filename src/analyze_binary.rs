@@ -28,9 +28,13 @@ struct AnalysisResult {
     crossed: bool,
     crossed_at: Option<usize>,
     risk_diff_at_cross: Option<f64>,
+    rd_ci_at_cross: Option<(f64, f64)>,       // Anytime-valid CI
     or_at_cross: Option<(f64, f64, f64)>,
+    or_ci_at_cross: Option<(f64, f64)>,       // Anytime-valid CI
     final_risk_diff: f64,
+    final_rd_ci: (f64, f64),                  // Anytime-valid CI
     final_or: (f64, f64, f64),
+    final_or_ci: (f64, f64),                  // Anytime-valid CI
     rate_trt: f64,
     rate_ctrl: f64,
     type_m: Option<f64>,
@@ -171,7 +175,9 @@ fn analyze(
     let mut crossed = false;
     let mut crossed_at = None;
     let mut risk_diff_at_cross = None;
+    let mut rd_ci_at_cross = None;
     let mut or_at_cross = None;
+    let mut or_ci_at_cross = None;
 
     for (i, &(treatment, outcome)) in data.iter().enumerate() {
         let patient = i + 1;
@@ -182,12 +188,16 @@ fn analyze(
             crossed = true;
             crossed_at = Some(patient);
             risk_diff_at_cross = Some(proc.current_risk_diff());
+            rd_ci_at_cross = Some(proc.confidence_sequence_rd(0.05));
             or_at_cross = Some(proc.current_odds_ratio());
+            or_ci_at_cross = Some(proc.confidence_sequence_or(0.05));
         }
     }
 
     let final_rd = proc.current_risk_diff();
+    let final_rd_ci = proc.confidence_sequence_rd(0.05);
     let final_or = proc.current_odds_ratio();
+    let final_or_ci = proc.confidence_sequence_or(0.05);
     let (rate_trt, rate_ctrl) = proc.get_rates();
     let (n_trt, n_ctrl) = proc.get_ns();
 
@@ -198,8 +208,10 @@ fn analyze(
     } else { None };
 
     AnalysisResult {
-        n_total, n_trt, n_ctrl, crossed, crossed_at, risk_diff_at_cross, or_at_cross,
-        final_risk_diff: final_rd, final_or, rate_trt, rate_ctrl, type_m,
+        n_total, n_trt, n_ctrl, crossed, crossed_at,
+        risk_diff_at_cross, rd_ci_at_cross, or_at_cross, or_ci_at_cross,
+        final_risk_diff: final_rd, final_rd_ci, final_or, final_or_ci,
+        rate_trt, rate_ctrl, type_m,
         final_evalue: proc.wealth, trajectory,
     }
 }
@@ -222,15 +234,22 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
 
     println!("\n--- Effect Sizes ---");
     if r.crossed {
-        let (or, lo, hi) = r.or_at_cross.unwrap();
+        let (or, _, _) = r.or_at_cross.unwrap();
+        let (rd_lo, rd_hi) = r.rd_ci_at_cross.unwrap();
+        let (or_lo, or_hi) = r.or_ci_at_cross.unwrap();
         println!("At crossing ({}):", r.crossed_at.unwrap());
-        println!("  RD:  {:.1}%", r.risk_diff_at_cross.unwrap() * 100.0);
-        println!("  OR:  {:.3} ({:.3}-{:.3})", or, lo, hi);
+        println!("  RD:  {:.1}% (95% CI: {:.1}% to {:.1}%)",
+                 r.risk_diff_at_cross.unwrap() * 100.0, rd_lo * 100.0, rd_hi * 100.0);
+        println!("  OR:  {:.3} (95% CI: {:.3} to {:.3})", or, or_lo, or_hi);
     }
-    let (or, lo, hi) = r.final_or;
+    let (or, _, _) = r.final_or;
+    let (rd_lo, rd_hi) = r.final_rd_ci;
+    let (or_lo, or_hi) = r.final_or_ci;
     println!("Final ({}):", r.n_total);
-    println!("  RD:  {:.1}%", r.final_risk_diff * 100.0);
-    println!("  OR:  {:.3} ({:.3}-{:.3})", or, lo, hi);
+    println!("  RD:  {:.1}% (95% CI: {:.1}% to {:.1}%)",
+             r.final_risk_diff * 100.0, rd_lo * 100.0, rd_hi * 100.0);
+    println!("  OR:  {:.3} (95% CI: {:.3} to {:.3})", or, or_lo, or_hi);
+    println!("\n  (CIs are anytime-valid confidence sequences)");
 
     if let Some(tm) = r.type_m { println!("\nType M: {:.2}x", tm); }
 
@@ -243,16 +262,21 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
 
 fn build_report(r: &AnalysisResult, csv_path: &str, burn_in: usize, ramp: usize, threshold: f64) -> String {
     let x: Vec<usize> = (0..=r.n_total).collect();
-    let (or, lo, hi) = r.final_or;
+    let (or, _, _) = r.final_or;
+    let (rd_lo, rd_hi) = r.final_rd_ci;
+    let (or_lo, or_hi) = r.final_or_ci;
 
     let status = if r.crossed {
         format!("<span style='color:green'>CROSSED at {}</span>", r.crossed_at.unwrap())
     } else { "<span style='color:gray'>Did not cross</span>".into() };
 
     let crossing = if r.crossed {
-        let (c_or, c_lo, c_hi) = r.or_at_cross.unwrap();
-        format!("<tr><td>At crossing:</td><td>RD {:.1}%, OR {:.3} ({:.3}-{:.3})</td></tr>",
-                r.risk_diff_at_cross.unwrap() * 100.0, c_or, c_lo, c_hi)
+        let (c_or, _, _) = r.or_at_cross.unwrap();
+        let (c_rd_lo, c_rd_hi) = r.rd_ci_at_cross.unwrap();
+        let (c_or_lo, c_or_hi) = r.or_ci_at_cross.unwrap();
+        format!(r#"<tr><td>At crossing:</td><td>RD {:.1}% (95% CI: {:.1}% to {:.1}%)<br>OR {:.3} (95% CI: {:.3} to {:.3})</td></tr>"#,
+                r.risk_diff_at_cross.unwrap() * 100.0, c_rd_lo * 100.0, c_rd_hi * 100.0,
+                c_or, c_or_lo, c_or_hi)
     } else { String::new() };
 
     let type_m = r.type_m.map_or(String::new(), |t| format!("<tr><td>Type M:</td><td>{:.2}x</td></tr>", t));
@@ -265,6 +289,7 @@ body{{font-family:system-ui,-apple-system,sans-serif;max-width:1400px;margin:0 a
 h1{{color:#1a1a2e}}h2{{color:#16213e;border-bottom:1px solid #ddd;padding-bottom:5px}}
 table{{margin:10px 0}}td{{padding:4px 12px}}
 .plot{{background:#fff;border-radius:8px;padding:10px;margin:20px 0;box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+.note{{font-size:0.9em;color:#666;margin-top:10px}}
 </style></head><body>
 <h1>Binary e-RT Analysis Report</h1>
 <p>{}</p>
@@ -289,9 +314,10 @@ table{{margin:10px 0}}td{{padding:4px 12px}}
 <tr><td>Final e-value:</td><td><strong>{:.4}</strong></td></tr>
 <tr><td>Status:</td><td>{}</td></tr>
 {}
-<tr><td>Final:</td><td>RD {:.1}%, OR {:.3} ({:.3}-{:.3})</td></tr>
+<tr><td>Final:</td><td>RD {:.1}% (95% CI: {:.1}% to {:.1}%)<br>OR {:.3} (95% CI: {:.3} to {:.3})</td></tr>
 {}
 </table>
+<p class="note">CIs are anytime-valid confidence sequences.</p>
 
 <h2>e-Value Trajectory</h2>
 <div class="plot"><div id="p1" style="height:400px"></div></div>
@@ -304,6 +330,7 @@ shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:{},y1:{},line:{{color:'green',da
 </body></html>"#,
         chrono_lite(), csv_path, r.n_total, r.n_trt, r.rate_trt * 100.0, r.n_ctrl, r.rate_ctrl * 100.0,
         burn_in, ramp, threshold,
-        r.final_evalue, status, crossing, r.final_risk_diff * 100.0, or, lo, hi, type_m,
+        r.final_evalue, status, crossing,
+        r.final_risk_diff * 100.0, rd_lo * 100.0, rd_hi * 100.0, or, or_lo, or_hi, type_m,
         x, r.trajectory, threshold, threshold)
 }
