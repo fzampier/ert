@@ -832,6 +832,8 @@ Plotly.newPlot('p2',t_alt.map((y,i)=>({{type:'scatter',y:y,line:{{color:'rgba(70
   shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:threshold,y1:threshold,line:{{color:'green',dash:'dash',width:2}}}}]}});
 </script></body></html>"#, console, null_trajectories, alt_trajectories, threshold);
 
-    File::create("multistate_report.html").unwrap().write_all(html.as_bytes()).unwrap();
-    println!("\n>> Saved: multistate_report.html");
+    match File::create("multistate_report.html").and_then(|mut f| f.write_all(html.as_bytes())) {
+        Ok(_) => println!("\n>> Saved: multistate_report.html"),
+        Err(e) => eprintln!("\nError saving report: {}", e),
+    }
 }

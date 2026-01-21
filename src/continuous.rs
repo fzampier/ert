@@ -138,7 +138,7 @@ pub fn run() {
             if !agnostic_stopped {
                 let running_med = if all_outcomes.len() > 1 {
                     let mut sorted = all_outcomes.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     sorted[sorted.len() / 2]
                 } else { outcome };
                 let signal = Signal { arm: if is_trt { Arm::Treatment } else { Arm::Control }, good: outcome > running_med };
@@ -244,8 +244,10 @@ pub fn run() {
 
     let html = build_report(&out, threshold, n_pts, &x_pts, &y_lo, &y_med, &y_hi, &sample_trajs, &stop_times);
 
-    File::create("continuous_report.html").unwrap().write_all(html.as_bytes()).unwrap();
-    println!("\n>> continuous_report.html");
+    match File::create("continuous_report.html").and_then(|mut f| f.write_all(html.as_bytes())) {
+        Ok(_) => println!("\n>> continuous_report.html"),
+        Err(e) => eprintln!("\nError saving report: {}", e),
+    }
 }
 
 fn build_report(

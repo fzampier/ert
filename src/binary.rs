@@ -248,8 +248,10 @@ pub fn run() {
         &stop_times,
     );
 
-    File::create("binary_report.html").unwrap().write_all(html.as_bytes()).unwrap();
-    println!("\n>> binary_report.html");
+    match File::create("binary_report.html").and_then(|mut f| f.write_all(html.as_bytes())) {
+        Ok(_) => println!("\n>> binary_report.html"),
+        Err(e) => eprintln!("\nError saving report: {}", e),
+    }
 }
 
 fn build_report(

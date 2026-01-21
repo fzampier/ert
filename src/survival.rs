@@ -72,7 +72,7 @@ fn simulate_trial<R: Rng + ?Sized>(
 fn compute_e_survival(data: &SurvivalData, burn_in: usize, ramp: usize, lambda_max: f64) -> Vec<f64> {
     let n = data.time.len();
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
+    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut wealth = vec![1.0; n];
     let mut cumulative_z: f64 = 0.0;
@@ -111,7 +111,7 @@ fn compute_e_survival(data: &SurvivalData, burn_in: usize, ramp: usize, lambda_m
 
 fn calculate_observed_hr(data: &SurvivalData, max_events: Option<usize>) -> f64 {
     let mut indices: Vec<usize> = (0..data.time.len()).collect();
-    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap());
+    indices.sort_by(|&a, &b| data.time[a].partial_cmp(&data.time[b]).unwrap_or(std::cmp::Ordering::Equal));
 
     let (mut events_trt, mut events_ctrl) = (0.0, 0.0);
     let mut event_count = 0;
@@ -150,7 +150,7 @@ fn build_report(
     }
 
     let mut sorted_stops = stops.to_vec();
-    sorted_stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_stops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let ecdf_x: Vec<f64> = sorted_stops.clone();
     let ecdf_y: Vec<f64> = (1..=sorted_stops.len()).map(|i| i as f64 / sorted_stops.len() as f64).collect();
 
@@ -320,7 +320,7 @@ pub fn run() {
     let mut y_hi: Vec<f64> = vec![0.0; steps.len()];
     for (i, vals) in step_vals.iter_mut().enumerate() {
         if vals.is_empty() { continue; }
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = vals.len();
         y_lo[i] = vals[(n as f64 * 0.05) as usize];
         y_med[i] = vals[n / 2];
@@ -370,7 +370,8 @@ pub fn run() {
     let html = build_report(&console, n_pts, threshold,
         &steps, &y_lo, &y_med, &y_hi, &sample_trajs, &stops);
 
-    let mut file = File::create("survival_report.html").unwrap();
-    file.write_all(html.as_bytes()).unwrap();
-    println!("\n>> survival_report.html");
+    match File::create("survival_report.html").and_then(|mut f| f.write_all(html.as_bytes())) {
+        Ok(_) => println!("\n>> survival_report.html"),
+        Err(e) => eprintln!("\nError saving report: {}", e),
+    }
 }

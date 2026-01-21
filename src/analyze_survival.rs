@@ -160,7 +160,7 @@ fn print_data_summary(data: &[SurvivalRecord]) {
 
     let median_time: f64 = {
         let mut times: Vec<f64> = data.iter().map(|r| r.time).collect();
-        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         times[times.len() / 2]
     };
 
@@ -181,7 +181,7 @@ fn analyze(data: &[SurvivalRecord], burn_in: usize, ramp: usize, threshold: f64)
 
     // Sort by time
     let mut sorted: Vec<&SurvivalRecord> = data.iter().collect();
-    sorted.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    sorted.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
 
     // Initialize risk sets
     let mut risk_trt: i32 = data.iter().filter(|r| r.treatment == 1).count() as i32;
