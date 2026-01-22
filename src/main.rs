@@ -10,13 +10,114 @@ mod analyze_survival;
 mod analyze_multistate;
 mod multistate_experiment;
 
-use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use clap::{Parser, Subcommand};
+
+/// Sequential Randomization Tests using e-values (betting martingales)
+#[derive(Parser)]
+#[command(name = "ert")]
+#[command(author = "Fernando G Zampieri")]
+#[command(version)]
+#[command(about = "Sequential Randomization Tests using e-values", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Auto-detect and analyze trial data (redirects binary data appropriately)
+    #[command(visible_alias = "a")]
+    Analyze {
+        /// Path to CSV file
+        file: PathBuf,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+
+    /// Analyze binary trial data (e-RT)
+    #[command(name = "analyze-binary", visible_alias = "ab")]
+    AnalyzeBinary {
+        /// Path to CSV file
+        file: PathBuf,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+
+    /// Analyze continuous trial data (e-RTc)
+    #[command(name = "analyze-continuous", visible_alias = "ac")]
+    AnalyzeContinuous {
+        /// Path to CSV file
+        file: PathBuf,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+
+    /// Analyze survival/time-to-event trial data (e-RTs)
+    #[command(name = "analyze-survival", visible_alias = "as")]
+    AnalyzeSurvival {
+        /// Path to CSV file
+        file: PathBuf,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+
+    /// Analyze multi-state trial data (e-RTms)
+    #[command(name = "analyze-multistate", visible_alias = "am")]
+    AnalyzeMultistate {
+        /// Path to CSV file
+        file: PathBuf,
+        /// State names, comma-separated, worst to best (e.g., "Dead,ICU,Ward,Home")
+        #[arg(short, long, value_delimiter = ',')]
+        states: Option<Vec<String>>,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+}
+
+#[derive(Parser, Clone)]
+struct AnalyzeArgs {
+    /// Success threshold (default: 20, i.e., alpha=0.05)
+    #[arg(short, long)]
+    threshold: Option<f64>,
+
+    /// Burn-in period before betting starts
+    #[arg(short, long)]
+    burn_in: Option<usize>,
+
+    /// Ramp period for gradual betting increase
+    #[arg(short, long)]
+    ramp: Option<usize>,
+
+    /// Skip HTML report generation
+    #[arg(long)]
+    no_report: bool,
+}
+
+/// Options struct for passing to analysis modules (preserves existing interface)
+#[derive(Default)]
+pub struct AnalyzeOptions {
+    pub threshold: Option<f64>,
+    pub burn_in: Option<usize>,
+    pub ramp: Option<usize>,
+    pub generate_report: bool,
+}
+
+impl From<&AnalyzeArgs> for AnalyzeOptions {
+    fn from(args: &AnalyzeArgs) -> Self {
+        AnalyzeOptions {
+            threshold: args.threshold,
+            burn_in: args.burn_in,
+            ramp: args.ramp,
+            generate_report: !args.no_report,
+        }
+    }
+}
 
 /// Detect if CSV data appears to be binary (all outcome values are 0 or 1).
-/// Returns Some(true) if binary, Some(false) if continuous, None if can't determine.
-fn detect_binary_data(path: &str) -> Option<bool> {
+fn detect_binary_data(path: &PathBuf) -> Option<bool> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -27,11 +128,10 @@ fn detect_binary_data(path: &str) -> Option<bool> {
     let mut seen_non_binary = false;
     let mut count = 0;
 
-    for line in lines.take(100) {  // Check first 100 rows
+    for line in lines.take(100) {
         let line = line.ok()?;
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() >= 2 {
-            // Assume outcome is second column (treatment, outcome format)
             let outcome = parts[1].trim();
             if let Ok(val) = outcome.parse::<f64>() {
                 count += 1;
@@ -50,256 +150,70 @@ fn detect_binary_data(path: &str) -> Option<bool> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    // If arguments provided, use CLI mode
-    if args.len() > 1 {
-        run_cli(&args[1..]);
-        return;
+    match cli.command {
+        Some(cmd) => run_command(cmd),
+        None => run_interactive(),
     }
-
-    // Otherwise, interactive menu
-    run_interactive();
 }
 
-fn run_cli(args: &[String]) {
-    if args.is_empty() {
-        print_usage();
-        return;
-    }
+fn run_command(cmd: Commands) {
+    match cmd {
+        Commands::Analyze { file, opts } => {
+            let options: AnalyzeOptions = (&opts).into();
+            let path_str = file.to_string_lossy();
 
-    match args[0].as_str() {
-        "analyze" | "a" => {
-            if args.len() < 2 {
-                eprintln!("Error: CSV file required");
-                eprintln!("Usage: ert analyze <file.csv> [options]");
-                return;
-            }
-            let csv_path = &args[1];
-            let opts = parse_analyze_options(&args[2..]);
-
-            // Auto-detect binary data and redirect or warn
-            if let Some(is_binary) = detect_binary_data(csv_path) {
+            // Auto-detect binary data and redirect
+            if let Some(is_binary) = detect_binary_data(&file) {
                 if is_binary {
                     eprintln!("Note: Data appears to be binary (all values 0 or 1).");
                     eprintln!("      Redirecting to analyze-binary for appropriate analysis.");
-                    eprintln!("      Use explicit 'ert analyze-binary' or 'ert analyze-continuous' to override.\n");
-                    if let Err(e) = analyze_binary::run_cli(csv_path, &opts) {
+                    eprintln!("      Use 'ert analyze-binary' or 'ert analyze-continuous' to override.\n");
+                    if let Err(e) = analyze_binary::run_cli(&path_str, &options) {
                         eprintln!("Error: {}", e);
                     }
                     return;
                 }
             }
 
-            if let Err(e) = analyze_continuous::run_cli(csv_path, &opts) {
+            if let Err(e) = analyze_continuous::run_cli(&path_str, &options) {
                 eprintln!("Error: {}", e);
             }
         }
-        "analyze-continuous" | "ac" => {
-            // Explicit continuous analysis (no auto-detection)
-            if args.len() < 2 {
-                eprintln!("Error: CSV file required");
-                eprintln!("Usage: ert analyze-continuous <file.csv> [options]");
-                return;
-            }
-            let csv_path = &args[1];
-            let opts = parse_analyze_options(&args[2..]);
 
-            if let Err(e) = analyze_continuous::run_cli(csv_path, &opts) {
+        Commands::AnalyzeBinary { file, opts } => {
+            let options: AnalyzeOptions = (&opts).into();
+            if let Err(e) = analyze_binary::run_cli(&file.to_string_lossy(), &options) {
                 eprintln!("Error: {}", e);
             }
         }
-        "analyze-binary" | "ab" => {
-            if args.len() < 2 {
-                eprintln!("Error: CSV file required");
-                eprintln!("Usage: ert analyze-binary <file.csv> [options]");
-                return;
-            }
-            let csv_path = &args[1];
-            let opts = parse_analyze_options(&args[2..]);
 
-            if let Err(e) = analyze_binary::run_cli(csv_path, &opts) {
+        Commands::AnalyzeContinuous { file, opts } => {
+            let options: AnalyzeOptions = (&opts).into();
+            if let Err(e) = analyze_continuous::run_cli(&file.to_string_lossy(), &options) {
                 eprintln!("Error: {}", e);
             }
         }
-        "analyze-survival" | "as" => {
-            if args.len() < 2 {
-                eprintln!("Error: CSV file required");
-                eprintln!("Usage: ert analyze-survival <file.csv> [options]");
-                return;
-            }
-            let csv_path = &args[1];
-            let opts = parse_analyze_options(&args[2..]);
 
-            if let Err(e) = analyze_survival::run_cli(csv_path, &opts) {
+        Commands::AnalyzeSurvival { file, opts } => {
+            let options: AnalyzeOptions = (&opts).into();
+            if let Err(e) = analyze_survival::run_cli(&file.to_string_lossy(), &options) {
                 eprintln!("Error: {}", e);
             }
         }
-        "analyze-multistate" | "am" => {
-            if args.len() < 2 {
-                eprintln!("Error: CSV file required");
-                eprintln!("Usage: ert analyze-multistate <file.csv> [options]");
-                return;
-            }
-            let csv_path = &args[1];
-            let opts = parse_multistate_options(&args[2..]);
 
+        Commands::AnalyzeMultistate { file, states, opts } => {
             analyze_multistate::run(
-                csv_path,
-                opts.state_names,
+                &file.to_string_lossy(),
+                states,
                 opts.threshold.unwrap_or(20.0),
                 opts.burn_in.unwrap_or(30),
                 opts.ramp.unwrap_or(50),
-                !opts.generate_report,
+                opts.no_report,
             );
         }
-        "help" | "-h" | "--help" => print_usage(),
-        _ => {
-            eprintln!("Unknown command: {}", args[0]);
-            print_usage();
-        }
     }
-}
-
-fn parse_analyze_options(args: &[String]) -> AnalyzeOptions {
-    let mut opts = AnalyzeOptions::default();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--threshold" | "-t" => {
-                if i + 1 < args.len() {
-                    opts.threshold = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--burn-in" | "-b" => {
-                if i + 1 < args.len() {
-                    opts.burn_in = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--ramp" | "-r" => {
-                if i + 1 < args.len() {
-                    opts.ramp = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--no-report" => {
-                opts.generate_report = false;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    opts
-}
-
-#[derive(Default)]
-pub struct AnalyzeOptions {
-    pub threshold: Option<f64>,      // default 20
-    pub burn_in: Option<usize>,      // default 50
-    pub ramp: Option<usize>,         // default 100
-    pub generate_report: bool,       // default true
-}
-
-impl AnalyzeOptions {
-    fn default() -> Self {
-        AnalyzeOptions {
-            threshold: None,
-            burn_in: None,
-            ramp: None,
-            generate_report: true,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct MultistateOptions {
-    pub state_names: Option<Vec<String>>,
-    pub threshold: Option<f64>,
-    pub burn_in: Option<usize>,
-    pub ramp: Option<usize>,
-    pub generate_report: bool,
-}
-
-fn parse_multistate_options(args: &[String]) -> MultistateOptions {
-    let mut opts = MultistateOptions {
-        state_names: None,
-        threshold: None,
-        burn_in: None,
-        ramp: None,
-        generate_report: true,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--states" | "-s" => {
-                if i + 1 < args.len() {
-                    opts.state_names = Some(
-                        args[i + 1].split(',')
-                            .map(|s| s.trim().to_string())
-                            .collect()
-                    );
-                    i += 1;
-                }
-            }
-            "--threshold" | "-t" => {
-                if i + 1 < args.len() {
-                    opts.threshold = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--burn-in" | "-b" => {
-                if i + 1 < args.len() {
-                    opts.burn_in = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--ramp" | "-r" => {
-                if i + 1 < args.len() {
-                    opts.ramp = args[i + 1].parse().ok();
-                    i += 1;
-                }
-            }
-            "--no-report" => {
-                opts.generate_report = false;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    opts
-}
-
-fn print_usage() {
-    println!("e-RT: Sequential Randomization Tests");
-    println!();
-    println!("USAGE:");
-    println!("  ert                                   Interactive mode");
-    println!("  ert analyze <file.csv>                Auto-detect and analyze trial data");
-    println!("  ert analyze-continuous <file.csv>     Analyze continuous trial data (e-RTc)");
-    println!("  ert analyze-binary <file.csv>         Analyze binary trial data (e-RT)");
-    println!("  ert analyze-survival <file.csv>       Analyze survival trial data (e-RTs)");
-    println!("  ert analyze-multistate <file.csv>     Analyze multi-state trial data (e-RTms)");
-    println!();
-    println!("OPTIONS:");
-    println!("  -t, --threshold <N>      Success threshold (default: 20)");
-    println!("  -b, --burn-in <N>        Burn-in period (default: 50/30)");
-    println!("  -r, --ramp <N>           Ramp period (default: 100/50)");
-    println!("  -s, --states <names>     State names, comma-separated (multistate)");
-    println!("  --no-report              Skip HTML report generation");
-    println!();
-    println!("CSV FORMAT:");
-    println!("  continuous:  treatment,outcome");
-    println!("  binary:      treatment,outcome (0/1)");
-    println!("  survival:    treatment,time,status (status: 1=event, 0=censored)");
-    println!("  multistate:  patient_id,time,state,treatment (state: 0=worst, N-1=best)");
-    println!();
-    println!("EXAMPLES:");
-    println!("  ert analyze trial.csv");
-    println!("  ert analyze-binary mortality.csv --threshold 20");
-    println!("  ert analyze-survival os_data.csv --burn-in 30");
-    println!("  ert analyze-multistate icu.csv --states \"Dead,ICU,Ward,Home\"");
 }
 
 fn run_interactive() {
