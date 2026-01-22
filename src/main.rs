@@ -220,50 +220,56 @@ fn run_interactive() {
     println!("\n==========================================");
     println!("   e-RT: Sequential Randomization Tests");
     println!("==========================================");
-    println!("\nSelect an option:");
-    println!("  1. e-RT   (binary endpoint)");
-    println!("  2. e-RTc  (continuous endpoint)");
-    println!("  3. e-RTu  (universal/agnostic)");
-    println!("  4. e-RTs  (survival/time-to-event)");
-    println!("  5. e-RTms (multi-state)");
-    println!("  6. Analyze Binary Trial (CSV)");
-    println!("  7. Analyze Continuous Trial (CSV)");
-    println!("  8. Analyze Survival Trial (CSV)");
-    println!("  9. Analyze Multi-State Trial (CSV)");
-    println!(" 10. [Demo] Why stratification works");
-    println!("  0. Exit");
 
-    print!("\nSelect: ");
-    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    loop {
+        println!("\nSelect an option:");
+        println!("  1. e-RT   (binary endpoint)");
+        println!("  2. e-RTc  (continuous endpoint)");
+        println!("  3. e-RTu  (universal/agnostic)");
+        println!("  4. e-RTs  (survival/time-to-event)");
+        println!("  5. e-RTms (multi-state)");
+        println!("  6. Analyze Binary Trial (CSV)");
+        println!("  7. Analyze Continuous Trial (CSV)");
+        println!("  8. Analyze Survival Trial (CSV)");
+        println!("  9. Analyze Multi-State Trial (CSV)");
+        println!(" 10. [Demo] Why stratification works");
+        println!("  0. Exit");
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
+        print!("\nSelect: ");
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-    match input.trim() {
-        "1" => binary::run(),
-        "2" => continuous::run(),
-        "3" => agnostic::run(),
-        "4" => survival::run(),
-        "5" => multistate::run(),
-        "6" => {
-            if let Err(e) = analyze_binary::run() {
-                eprintln!("Error: {}", e);
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+
+        match input.trim() {
+            "1" => binary::run(),
+            "2" => continuous::run(),
+            "3" => agnostic::run(),
+            "4" => survival::run(),
+            "5" => multistate::run(),
+            "6" => {
+                if let Err(e) = analyze_binary::run() {
+                    eprintln!("Error: {}", e);
+                }
             }
-        }
-        "7" => {
-            if let Err(e) = analyze_continuous::run() {
-                eprintln!("Error: {}", e);
+            "7" => {
+                if let Err(e) = analyze_continuous::run() {
+                    eprintln!("Error: {}", e);
+                }
             }
-        }
-        "8" => {
-            if let Err(e) = analyze_survival::run() {
-                eprintln!("Error: {}", e);
+            "8" => {
+                if let Err(e) = analyze_survival::run() {
+                    eprintln!("Error: {}", e);
+                }
             }
+            "9" => run_analyze_multistate_interactive(),
+            "10" => multistate_experiment::run(),
+            "0" => {
+                println!("Goodbye!");
+                break;
+            }
+            _ => println!("Invalid option"),
         }
-        "9" => run_analyze_multistate_interactive(),
-        "10" => multistate_experiment::run(),
-        "0" => println!("Goodbye!"),
-        _ => println!("Invalid option"),
     }
 }
 
