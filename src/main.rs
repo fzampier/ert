@@ -94,6 +94,10 @@ struct AnalyzeArgs {
     /// Skip HTML report generation
     #[arg(long)]
     no_report: bool,
+
+    /// Output results as CSV (single row, machine-readable)
+    #[arg(long)]
+    csv: bool,
 }
 
 /// Options struct for passing to analysis modules (preserves existing interface)
@@ -103,6 +107,7 @@ pub struct AnalyzeOptions {
     pub burn_in: Option<usize>,
     pub ramp: Option<usize>,
     pub generate_report: bool,
+    pub csv_output: bool,
 }
 
 impl From<&AnalyzeArgs> for AnalyzeOptions {
@@ -112,6 +117,7 @@ impl From<&AnalyzeArgs> for AnalyzeOptions {
             burn_in: args.burn_in,
             ramp: args.ramp,
             generate_report: !args.no_report,
+            csv_output: args.csv,
         }
     }
 }
@@ -211,6 +217,7 @@ fn run_command(cmd: Commands) {
                 opts.burn_in.unwrap_or(30),
                 opts.ramp.unwrap_or(50),
                 opts.no_report,
+                opts.csv,
             );
         }
     }
@@ -223,17 +230,21 @@ fn run_interactive() {
 
     loop {
         println!("\nSelect an option:");
+        println!("  --- Simulations ---");
         println!("  1. e-RT   (binary endpoint)");
         println!("  2. e-RTc  (continuous endpoint)");
         println!("  3. e-RTu  (universal/agnostic)");
         println!("  4. e-RTs  (survival/time-to-event)");
         println!("  5. e-RTms (multi-state)");
-        println!("  6. Analyze Binary Trial (CSV)");
-        println!("  7. Analyze Continuous Trial (CSV)");
-        println!("  8. Analyze Survival Trial (CSV)");
-        println!("  9. Analyze Multi-State Trial (CSV)");
+        println!("  --- Analyze Real Data ---");
+        println!("  6. Analyze Binary Trial");
+        println!("  7. Analyze Continuous Trial");
+        println!("  8. Analyze Survival Trial");
+        println!("  9. Analyze Multi-State Trial");
+        println!("  --- Other ---");
         println!(" 10. [Demo] Why stratification works");
         println!("  0. Exit");
+        println!("\n  Tip: Use CLI with --csv for machine-readable output");
 
         print!("\nSelect: ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
@@ -285,5 +296,5 @@ fn run_analyze_multistate_interactive() {
         Some(states_str.split(',').map(|s| s.trim().to_string()).collect())
     };
 
-    analyze_multistate::run(&path, state_names, 20.0, 30, 50, false);
+    analyze_multistate::run(&path, state_names, 20.0, 30, 50, false, false);
 }

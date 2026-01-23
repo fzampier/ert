@@ -45,6 +45,23 @@ struct AnalysisResult {
 // === CLI ===
 
 pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<dyn Error>> {
+    let burn_in = opts.burn_in.unwrap_or(50);
+    let ramp = opts.ramp.unwrap_or(100);
+    let threshold = opts.threshold.unwrap_or(20.0);
+
+    // CSV output mode
+    if opts.csv_output {
+        let data = read_csv(csv_path)?;
+        if data.is_empty() {
+            eprintln!("Error: No valid rows in CSV.");
+            return Ok(());
+        }
+        let result = analyze(&data, burn_in, ramp, threshold);
+        print_csv(&result, csv_path);
+        return Ok(());
+    }
+
+    // Normal interactive output
     println!("\n==========================================");
     println!("   ANALYZE BINARY TRIAL DATA");
     println!("==========================================\n");
@@ -68,10 +85,6 @@ pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<d
              if n_trt > 0 { events_trt as f64 / n_trt as f64 * 100.0 } else { 0.0 });
     println!("Control:    {} ({} events, {:.1}%)", n_ctrl, events_ctrl,
              if n_ctrl > 0 { events_ctrl as f64 / n_ctrl as f64 * 100.0 } else { 0.0 });
-
-    let burn_in = opts.burn_in.unwrap_or(50);
-    let ramp = opts.ramp.unwrap_or(100);
-    let threshold = opts.threshold.unwrap_or(20.0);
 
     println!("\n--- Parameters ---");
     println!("Burn-in: {}  Ramp: {}  Threshold: {}", burn_in, ramp, threshold);
@@ -263,6 +276,33 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
     println!("\n--- Rates ---");
     println!("Treatment: {:.1}% (n={})", r.rate_trt * 100.0, r.n_trt);
     println!("Control:   {:.1}% (n={})", r.rate_ctrl * 100.0, r.n_ctrl);
+}
+
+// === CSV OUTPUT ===
+
+fn print_csv(r: &AnalysisResult, file: &str) {
+    let (or, _, _) = r.final_or;
+    let (rd_lo, rd_hi) = r.final_rd_ci;
+    let (or_lo, or_hi) = r.final_or_ci;
+    // Header
+    println!("file,n_total,n_trt,n_ctrl,crossed,crossed_at,evalue,rd,rd_ci_lo,rd_ci_hi,or,or_ci_lo,or_ci_hi,type_m");
+    // Data row
+    println!("{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
+        file,
+        r.n_total,
+        r.n_trt,
+        r.n_ctrl,
+        r.crossed,
+        r.crossed_at.map_or("".to_string(), |v| v.to_string()),
+        r.final_evalue,
+        r.final_risk_diff,
+        rd_lo,
+        rd_hi,
+        or,
+        or_lo,
+        or_hi,
+        r.type_m.map_or("".to_string(), |v| format!("{:.2}", v)),
+    );
 }
 
 // === HTML REPORT ===

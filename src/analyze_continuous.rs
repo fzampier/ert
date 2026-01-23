@@ -46,38 +46,50 @@ struct AnalysisResult {
 // === CLI ===
 
 pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<dyn Error>> {
-    println!("\n==========================================");
-    println!("   ANALYZE CONTINUOUS TRIAL DATA (e-RTc)");
-    println!("==========================================\n");
+    let burn_in = opts.burn_in.unwrap_or(50);
+    let ramp = opts.ramp.unwrap_or(100);
+    let threshold = opts.threshold.unwrap_or(20.0);
+    let c_max = 0.6;
 
-    println!("Reading {}...", csv_path);
     let data = read_csv(csv_path)?;
-    if data.is_empty() { println!("Error: No valid data."); return Ok(()); }
+    if data.is_empty() {
+        eprintln!("Error: No valid data.");
+        return Ok(());
+    }
 
-    // Summary stats
+    // Compute pooled SD for analysis
     let trt: Vec<f64> = data.iter().filter(|r| r.0 == 1).map(|r| r.1).collect();
     let ctrl: Vec<f64> = data.iter().filter(|r| r.0 == 0).map(|r| r.1).collect();
     let (n_trt, n_ctrl) = (trt.len(), ctrl.len());
     let mean_trt = if n_trt > 0 { trt.iter().sum::<f64>() / n_trt as f64 } else { 0.0 };
     let mean_ctrl = if n_ctrl > 0 { ctrl.iter().sum::<f64>() / n_ctrl as f64 } else { 0.0 };
-    let min_obs = data.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
-    let max_obs = data.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
-
     let ss_trt: f64 = trt.iter().map(|x| (x - mean_trt).powi(2)).sum();
     let ss_ctrl: f64 = ctrl.iter().map(|x| (x - mean_ctrl).powi(2)).sum();
     let pooled_sd = if n_trt > 1 && n_ctrl > 1 {
         ((ss_trt + ss_ctrl) / (n_trt + n_ctrl - 2) as f64).sqrt()
     } else { 1.0 };
 
+    // CSV output mode
+    if opts.csv_output {
+        let result = analyze(&data, burn_in, ramp, threshold, c_max, pooled_sd);
+        print_csv(&result, csv_path);
+        return Ok(());
+    }
+
+    // Normal interactive output
+    println!("\n==========================================");
+    println!("   ANALYZE CONTINUOUS TRIAL DATA (e-RTc)");
+    println!("==========================================\n");
+
+    println!("Reading {}...", csv_path);
+
+    let min_obs = data.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+    let max_obs = data.iter().map(|r| r.1).fold(f64::NEG_INFINITY, f64::max);
+
     println!("\n--- Data Summary ---");
     println!("Total: {}  Trt: {} (mean {:.2})  Ctrl: {} (mean {:.2})", data.len(), n_trt, mean_trt, n_ctrl, mean_ctrl);
     println!("Range: [{:.2}, {:.2}]  SD: {:.2}  Diff: {:.2}  d: {:.2}",
              min_obs, max_obs, pooled_sd, mean_trt - mean_ctrl, (mean_trt - mean_ctrl) / pooled_sd);
-
-    let burn_in = opts.burn_in.unwrap_or(50);
-    let ramp = opts.ramp.unwrap_or(100);
-    let threshold = opts.threshold.unwrap_or(20.0);
-    let c_max = 0.6;
 
     println!("\n--- Parameters ---");
     println!("Burn-in: {}  Ramp: {}  Threshold: {}  c_max: {:.2}", burn_in, ramp, threshold, c_max);
@@ -270,6 +282,32 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
     }
 
     if let Some(tm) = r.type_m { println!("\nType M: {:.2}x", tm); }
+}
+
+// === CSV OUTPUT ===
+
+fn print_csv(r: &AnalysisResult, file: &str) {
+    let (d_lo, d_hi) = r.final_ci_d;
+    let (diff_lo, diff_hi) = r.final_ci_diff;
+    // Header
+    println!("file,n_total,n_trt,n_ctrl,crossed,crossed_at,evalue,diff,diff_ci_lo,diff_ci_hi,cohens_d,d_ci_lo,d_ci_hi,type_m");
+    // Data row
+    println!("{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
+        file,
+        r.n_total,
+        r.n_trt,
+        r.n_ctrl,
+        r.crossed,
+        r.crossed_at.map_or("".to_string(), |v| v.to_string()),
+        r.final_evalue,
+        r.final_diff,
+        diff_lo,
+        diff_hi,
+        r.final_effect,
+        d_lo,
+        d_hi,
+        r.type_m.map_or("".to_string(), |v| format!("{:.2}", v)),
+    );
 }
 
 // === HTML REPORT ===

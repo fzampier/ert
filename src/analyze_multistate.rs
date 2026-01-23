@@ -543,12 +543,13 @@ fn generate_html_report(result: &AnalysisResult, path: &str) -> std::io::Result<
 
 // === MAIN ENTRY ===
 
-pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in: usize, ramp: usize, no_report: bool) {
-    println!("\n==========================================");
-    println!("   ANALYZE MULTI-STATE TRIAL DATA");
-    println!("==========================================\n");
-
-    println!("Reading {}...", path);
+pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in: usize, ramp: usize, no_report: bool, csv_output: bool) {
+    if !csv_output {
+        println!("\n==========================================");
+        println!("   ANALYZE MULTI-STATE TRIAL DATA");
+        println!("==========================================\n");
+        println!("Reading {}...", path);
+    }
 
     let records = match parse_csv(path) {
         Ok(r) => r,
@@ -586,8 +587,10 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     let n_control = patients.values().filter(|&&t| t == 0).count();
     let n_treatment = patients.values().filter(|&&t| t == 1).count();
 
-    println!("Found {} patients ({} control, {} treatment)", n_patients, n_control, n_treatment);
-    println!("States: {} (ordered worst to best)", state_names.join(" < "));
+    if !csv_output {
+        println!("Found {} patients ({} control, {} treatment)", n_patients, n_control, n_treatment);
+        println!("States: {} (ordered worst to best)", state_names.join(" < "));
+    }
 
     // Extract transitions
     let transitions = extract_transitions(&records);
@@ -595,8 +598,10 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     let n_good = transitions.iter().filter(|t| t.is_good()).count();
     let n_bad = transitions.iter().filter(|t| t.is_bad()).count();
 
-    println!("Transitions: {} ({} good, {} bad, {} neutral)",
-             n_transitions, n_good, n_bad, n_transitions - n_good - n_bad);
+    if !csv_output {
+        println!("Transitions: {} ({} good, {} bad, {} neutral)",
+                 n_transitions, n_good, n_bad, n_transitions - n_good - n_bad);
+    }
 
     if transitions.is_empty() {
         println!("Error: No transitions found");
@@ -604,7 +609,9 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     }
 
     // Run e-process
-    println!("\nRunning e-process (threshold={}, burn-in={}, ramp={})...", threshold, burn_in, ramp);
+    if !csv_output {
+        println!("\nRunning e-process (threshold={}, burn-in={}, ramp={})...", threshold, burn_in, ramp);
+    }
     let (e_values, crossed, crossing_index) = run_e_process(&transitions, threshold, burn_in, ramp);
     let final_e = *e_values.last().unwrap_or(&1.0);
 
@@ -617,6 +624,26 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
     // Effect estimates
     let prop_or = calculate_proportional_or(&ctrl_dist, &trt_dist);
     let mann_whitney = calculate_mann_whitney(&ctrl_dist, &trt_dist);
+
+    // CSV output mode
+    if csv_output {
+        println!("file,n_patients,n_ctrl,n_trt,n_transitions,n_good,n_bad,crossed,crossed_at,evalue,prop_or,mann_whitney");
+        println!("{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4}",
+            path,
+            n_patients,
+            n_control,
+            n_treatment,
+            n_transitions,
+            n_good,
+            n_bad,
+            crossed,
+            crossing_index.map_or("".to_string(), |v| (v + 1).to_string()),
+            final_e,
+            prop_or,
+            mann_whitney,
+        );
+        return;
+    }
 
     // Print results
     println!("\n--- Results ---");

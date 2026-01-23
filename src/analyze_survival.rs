@@ -44,6 +44,23 @@ struct AnalysisResult {
 // === CLI ===
 
 pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<dyn Error>> {
+    let burn_in = opts.burn_in.unwrap_or(30);
+    let ramp = opts.ramp.unwrap_or(50);
+    let threshold = opts.threshold.unwrap_or(20.0);
+
+    // CSV output mode: minimal output, just the data
+    if opts.csv_output {
+        let data = read_csv(csv_path)?;
+        if data.is_empty() {
+            eprintln!("Error: No valid rows in CSV.");
+            return Ok(());
+        }
+        let result = analyze(&data, burn_in, ramp, threshold);
+        print_csv(&result, csv_path);
+        return Ok(());
+    }
+
+    // Normal interactive output
     println!("\n==========================================");
     println!("   ANALYZE SURVIVAL TRIAL DATA (e-RTs)");
     println!("==========================================\n");
@@ -56,10 +73,6 @@ pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<d
     }
 
     print_data_summary(&data);
-
-    let burn_in = opts.burn_in.unwrap_or(30);
-    let ramp = opts.ramp.unwrap_or(50);
-    let threshold = opts.threshold.unwrap_or(20.0);
 
     println!("\n--- Parameters ---");
     println!("Burn-in: {}  Ramp: {}  Threshold: {}", burn_in, ramp, threshold);
@@ -385,6 +398,30 @@ fn print_results(r: &AnalysisResult, threshold: f64) {
              if r.n_trt > 0 { r.events_trt as f64 / r.n_trt as f64 * 100.0 } else { 0.0 });
     println!("Control:   {}/{} ({:.1}%)", r.events_ctrl, r.n_ctrl,
              if r.n_ctrl > 0 { r.events_ctrl as f64 / r.n_ctrl as f64 * 100.0 } else { 0.0 });
+}
+
+// === CSV OUTPUT ===
+
+fn print_csv(r: &AnalysisResult, file: &str) {
+    // Header
+    println!("file,n_total,n_trt,n_ctrl,n_events,events_trt,events_ctrl,crossed,crossed_at,evalue,hr,hr_ci_lo,hr_ci_hi,type_m");
+    // Data row
+    println!("{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{}",
+        file,
+        r.n_total,
+        r.n_trt,
+        r.n_ctrl,
+        r.n_events,
+        r.events_trt,
+        r.events_ctrl,
+        r.crossed,
+        r.crossed_at.map_or("".to_string(), |v| v.to_string()),
+        r.final_evalue,
+        r.hr_final,
+        r.hr_ci_final.0,
+        r.hr_ci_final.1,
+        r.type_m.map_or("".to_string(), |v| format!("{:.2}", v)),
+    );
 }
 
 // === HTML REPORT ===
