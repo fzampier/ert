@@ -15,11 +15,17 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
+const VERSION_INFO: &str = concat!(
+    env!("CARGO_PKG_VERSION"), "\n",
+    "MIT License\n",
+    "Fernando G Zampieri (fzampier@ualberta.ca)"
+);
+
 /// Sequential Randomization Tests using e-values (betting martingales)
 #[derive(Parser)]
 #[command(name = "ert")]
-#[command(author = "Fernando G Zampieri")]
-#[command(version)]
+#[command(author = "Fernando G Zampieri (fzampier@ualberta.ca)")]
+#[command(version = VERSION_INFO)]
 #[command(about = "Sequential Randomization Tests using e-values", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -226,6 +232,8 @@ fn run_command(cmd: Commands) {
 fn run_interactive() {
     println!("\n==========================================");
     println!("   e-RT: Sequential Randomization Tests");
+    println!("   v{} - MIT License", env!("CARGO_PKG_VERSION"));
+    println!("   Fernando G Zampieri (fzampier@ualberta.ca)");
     println!("==========================================");
 
     loop {
