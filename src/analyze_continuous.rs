@@ -7,7 +7,7 @@ use csv::ReaderBuilder;
 use serde::Deserialize;
 
 use crate::ert_core::{
-    get_input, get_input_usize, get_bool, get_string, chrono_lite, MADProcess,
+    get_input, get_input_usize, get_bool, get_string, chrono_lite, report_path, MADProcess,
 };
 
 // === DATA STRUCTURES ===
@@ -101,8 +101,9 @@ pub fn run_cli(csv_path: &str, opts: &crate::AnalyzeOptions) -> Result<(), Box<d
 
     if opts.generate_report {
         let html = build_html(&result, csv_path, burn_in, ramp, threshold, c_max);
-        File::create("continuous_analysis_report.html")?.write_all(html.as_bytes())?;
-        println!("\n>> Saved: continuous_analysis_report.html");
+        let out_path = report_path(csv_path, "continuous_analysis_report.html");
+        File::create(&out_path)?.write_all(html.as_bytes())?;
+        println!("\n>> Saved: {}", out_path);
     }
 
     Ok(())
@@ -153,8 +154,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     if get_bool("\nGenerate HTML report?") {
         let html = build_html(&result, &csv_path, burn_in, ramp, threshold, c_max);
-        File::create("continuous_analysis_report.html")?.write_all(html.as_bytes())?;
-        println!(">> Saved: continuous_analysis_report.html");
+        let out_path = report_path(&csv_path, "continuous_analysis_report.html");
+        File::create(&out_path)?.write_all(html.as_bytes())?;
+        println!(">> Saved: {}", out_path);
     }
 
     Ok(())

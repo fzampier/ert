@@ -147,6 +147,18 @@ fn is_leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Build report output path: place report in same directory as input CSV
+pub fn report_path(csv_path: &str, report_name: &str) -> String {
+    use std::path::Path;
+    let path = Path::new(csv_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.join(report_name).to_string_lossy().to_string();
+        }
+    }
+    report_name.to_string()
+}
+
 // ============================================================================
 // BINARY e-RT CORE
 // ============================================================================

@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
 use crate::agnostic::{AgnosticERT, Signal};
-use crate::ert_core::chrono_lite;
+use crate::ert_core::{chrono_lite, report_path};
 
 // === DATA STRUCTURES ===
 
@@ -713,10 +713,11 @@ pub fn run(path: &str, state_names: Option<Vec<String>>, threshold: f64, burn_in
             mann_whitney,
         };
 
-        if let Err(e) = generate_html_report(&result, "multistate_analysis_report.html") {
+        let out_path = report_path(path, "multistate_analysis_report.html");
+        if let Err(e) = generate_html_report(&result, &out_path) {
             println!("\nWarning: Could not generate report: {}", e);
         } else {
-            println!("\n>> Saved: multistate_analysis_report.html");
+            println!("\n>> Saved: {}", out_path);
         }
     }
 }
