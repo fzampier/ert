@@ -16,11 +16,13 @@ Sequential Randomization Tests using e-values (betting martingales).
 | e-RTu | 3 | Universal/agnostic | Rate Difference |
 | e-RTs | 4 | Time-to-event (survival) | Hazard-based |
 | e-RTms | 5 | Multi-state (ordinal trajectories) | Proportional OR |
-| Analyze Binary | 6 | Real trial CSV (binary) | RD, OR + anytime-valid CIs |
-| Analyze Continuous | 7 | Real trial CSV (continuous) | Difference, Cohen's d + anytime-valid CIs |
-| Analyze Survival | 8 | Real trial CSV (survival) | HR + anytime-valid CIs |
-| Analyze Multi-State | 9 | Real trial CSV (multi-state) | Proportional OR |
-| Stratification Demo | 10 | Why stratification works | - |
+| e-RTd | 6 | Deaths-only (no denominator) | Mortality Rate Ratio |
+| Analyze Binary | 7 | Real trial CSV (binary) | RD, OR + anytime-valid CIs |
+| Analyze Continuous | 8 | Real trial CSV (continuous) | Difference, Cohen's d + anytime-valid CIs |
+| Analyze Survival | 9 | Real trial CSV (survival) | HR + anytime-valid CIs |
+| Analyze Multi-State | 10 | Real trial CSV (multi-state) | Proportional OR |
+| Analyze Deaths-Only | 11 | Real trial CSV (deaths-only) | p, RR + anytime-valid CIs |
+| Stratification Demo | 12 | Why stratification works | - |
 
 ---
 
@@ -35,7 +37,7 @@ Three layers of sequential testing, from most to least powerful:
 |                                                             |
 |                     | pay for sequential                    |
 |                     v                                       |
-|  DEDICATED (e-RT, e-RTc, e-RTs, e-RTms)                     |
+|  DEDICATED (e-RT, e-RTc, e-RTs, e-RTms, e-RTd)              |
 |  Sequential. Anytime-valid. Domain-aware betting.           |
 |  Uses domain knowledge (rates, means, hazards, transitions).|
 |                                                             |
@@ -114,6 +116,7 @@ This uses a time-uniform critical value (Robbins mixture) that grows slowly with
 | Analyze Binary | Risk Difference, Odds Ratio |
 | Analyze Continuous | Raw Mean Difference, Cohen's d |
 | Analyze Survival | Hazard Ratio |
+| Analyze Deaths-Only | p (death proportion), Mortality Rate Ratio |
 
 **Example output:**
 ```
@@ -401,9 +404,71 @@ Stratification recovers power when patients bounce between non-absorbing states.
 
 ---
 
-### 6. Analyze Binary Trial (CSV)
+### 6. e-RTd (Deaths-Only)
 
 **Menu option:** 6
+
+**Use case:** Trials where only death events are recorded, without requiring complete enrollment data or survivor tracking. Useful when denominator information is unavailable or uncertain.
+
+**Mathematical basis:**
+
+Under 1:1 randomization, if treatment has no effect on mortality:
+```
+P(death from treatment | death occurred) = 0.5
+```
+
+e-RTd monitors the proportion of deaths from the treatment arm. The e-process bets on deviations from 0.5.
+
+**Formula:**
+
+```
+Let d_T(n) = cumulative treatment deaths up to death n
+    d_C(n) = cumulative control deaths up to death n
+    p(n) = d_T(n) / (d_T(n) + d_C(n))  # observed proportion
+
+Ramp factor:
+    c(n) = clamp((n - burn_in) / ramp, 0, 1)
+
+For death n from arm A:
+    lambda_n = 0.5 + c(n) * (p(n-1) - 0.5)
+    lambda_n = clamp(lambda_n, 0.01, 0.99)
+
+    If A = treatment:
+        E_n = E_{n-1} * lambda_n / 0.5
+    If A = control:
+        E_n = E_{n-1} * (1 - lambda_n) / 0.5
+```
+
+**Effect measures:**
+
+- **p = P(death from treatment | death):** Under null, p = 0.5
+- **RR = Mortality Rate Ratio = p / (1-p):** Under null, RR = 1.0
+
+**Sample size considerations:**
+
+e-RTd requires approximately **2.5x the frequentist sample size** for equivalent power, because:
+1. It discards survivor information (only observes deaths)
+2. Sequential testing costs ~10-20% power
+3. Information is in death counts, not rates
+
+**Parameters:**
+- `P(death | control)`: Control arm mortality rate (e.g., 0.10)
+- `P(death | treatment)`: Treatment arm mortality rate (e.g., 0.05)
+- `Patients per trial`: Sample size (can auto-calculate from power)
+- `Simulations`: Number of Monte Carlo runs
+- `Threshold`: e-value threshold for rejection (default 20)
+
+**Output:**
+- Type I error rate (should be <= alpha)
+- Power (rejection rate under alternative)
+- Comparison with frequentist z-test power
+- HTML report with e-value trajectories
+
+---
+
+### 7. Analyze Binary Trial (CSV)
+
+**Menu option:** 7
 
 **CLI:** `ert analyze-binary <file.csv> [options]`
 
@@ -437,9 +502,9 @@ treatment,outcome
 
 ---
 
-### 7. Analyze Continuous Trial (CSV)
+### 8. Analyze Continuous Trial (CSV)
 
-**Menu option:** 7
+**Menu option:** 8
 
 **CLI:** `ert analyze-continuous <file.csv> [options]`
 
@@ -473,9 +538,9 @@ treatment,outcome
 
 ---
 
-### 8. Analyze Survival Trial (CSV)
+### 9. Analyze Survival Trial (CSV)
 
-**Menu option:** 8
+**Menu option:** 9
 
 **CLI:** `ert analyze-survival <file.csv> [options]`
 
@@ -510,9 +575,9 @@ treatment,time,status
 
 ---
 
-### 9. Analyze Multi-State Trial (CSV)
+### 10. Analyze Multi-State Trial (CSV)
 
-**Menu option:** 9
+**Menu option:** 10
 
 **CLI:** `ert analyze-multistate <file.csv> [options]`
 
@@ -560,9 +625,61 @@ ert analyze-multistate icu_trial.csv --states "Dead,ICU,Ward,Home"
 
 ---
 
-### 10. Stratification Demo
+### 11. Analyze Deaths-Only Trial (CSV)
 
-**Menu option:** 10
+**Menu option:** 11
+
+**CLI:** `ert analyze-deaths <file.csv> [options]`
+
+**Use case:** Analyze real trial data where only death events are recorded, without survivor tracking or complete enrollment information.
+
+**CSV format:**
+```
+arm,time
+1,5
+0,12
+0,18
+1,25
+...
+```
+- `arm`: 0 (control) or 1 (treatment)
+- `time`: Optional, time of death (for plotting)
+
+Each row represents one death event.
+
+**Uses e-RTd formula** applied to death sequence.
+
+**Parameters:**
+- `Burn-in`: Initial deaths before betting starts (default 30)
+- `Ramp`: Gradual increase to full betting (default 50)
+- `Success threshold`: e-value for rejection (default 20)
+
+**Output:**
+- e-value trajectory
+- Effect estimates with **anytime-valid 95% CIs**:
+  - p = P(death from treatment | death)
+  - RR = Mortality Rate Ratio = p / (1-p)
+- Death counts by arm
+- Interpretation (benefit vs harm)
+- HTML report with trajectory plot
+
+**CLI options:**
+- `--threshold` or `-t`: e-value threshold (default 20)
+- `--burn-in` or `-b`: Initial deaths before betting (default 30)
+- `--ramp` or `-r`: Ramp period (default 50)
+- `--no-report`: Skip HTML report
+- `--csv`: Machine-readable CSV output
+
+**Example:**
+```bash
+ert analyze-deaths trial_deaths.csv -b 30 -r 50 -t 20
+```
+
+---
+
+### 12. Stratification Demo
+
+**Menu option:** 12
 
 Demonstrates why stratification matters for multi-state outcomes with bouncing (non-absorbing) states.
 
@@ -600,6 +717,7 @@ Purpose: Prevents catastrophic early losses from noise before effect direction i
 | e-RTc (continuous) | 20 | 50 | Continuous outcomes carry more information per patient |
 | e-RTs (survival) | 30 | 50 | Events are sparse; balance between learning and not waiting too long |
 | e-RTms (multi-state) | 30 | 50 | Multiple transitions per patient; similar to survival |
+| e-RTd (deaths-only) | 30 | 50 | Deaths are sparse like events; similar to survival |
 
 The key tradeoff:
 - **Higher burn-in:** More robust direction learning, but delays early stopping
@@ -646,10 +764,12 @@ Reports use:
 | `survival_report.html` | e-RTs simulation |
 | `multistate_report.html` | e-RTms simulation |
 | `agnostic_report.html` | e-RTu simulation |
+| `deaths_only_report.html` | e-RTd simulation |
 | `binary_analysis_report.html` | Analyze Binary (CSV) |
 | `continuous_analysis_report.html` | Analyze Continuous (CSV) |
 | `survival_analysis_report.html` | Analyze Survival (CSV) |
 | `multistate_analysis_report.html` | Analyze Multi-State (CSV) |
+| `deaths_analysis_report.html` | Analyze Deaths-Only (CSV) |
 
 ---
 

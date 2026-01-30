@@ -4,10 +4,12 @@ mod continuous;
 mod survival;
 mod multistate;
 mod agnostic;
+mod deaths_only;
 mod analyze_binary;
 mod analyze_continuous;
 mod analyze_survival;
 mod analyze_multistate;
+mod analyze_deaths;
 mod multistate_experiment;
 
 use std::fs::File;
@@ -78,6 +80,15 @@ enum Commands {
         /// State names, comma-separated, worst to best (e.g., "Dead,ICU,Ward,Home")
         #[arg(short, long, value_delimiter = ',')]
         states: Option<Vec<String>>,
+        #[command(flatten)]
+        opts: AnalyzeArgs,
+    },
+
+    /// Analyze deaths-only trial data (e-RTd)
+    #[command(name = "analyze-deaths", visible_alias = "ad")]
+    AnalyzeDeaths {
+        /// Path to CSV file (one row per death: arm,time)
+        file: PathBuf,
         #[command(flatten)]
         opts: AnalyzeArgs,
     },
@@ -226,6 +237,13 @@ fn run_command(cmd: Commands) {
                 opts.csv,
             );
         }
+
+        Commands::AnalyzeDeaths { file, opts } => {
+            let options: AnalyzeOptions = (&opts).into();
+            if let Err(e) = analyze_deaths::run_cli(&file.to_string_lossy(), &options) {
+                eprintln!("Error: {}", e);
+            }
+        }
     }
 }
 
@@ -244,13 +262,15 @@ fn run_interactive() {
         println!("  3. e-RTu  (universal/agnostic)");
         println!("  4. e-RTs  (survival/time-to-event)");
         println!("  5. e-RTms (multi-state)");
+        println!("  6. e-RTd  (deaths only)");
         println!("  --- Analyze Real Data ---");
-        println!("  6. Analyze Binary Trial");
-        println!("  7. Analyze Continuous Trial");
-        println!("  8. Analyze Survival Trial");
-        println!("  9. Analyze Multi-State Trial");
+        println!("  7. Analyze Binary Trial");
+        println!("  8. Analyze Continuous Trial");
+        println!("  9. Analyze Survival Trial");
+        println!(" 10. Analyze Multi-State Trial");
+        println!(" 11. Analyze Deaths-Only Trial");
         println!("  --- Other ---");
-        println!(" 10. [Demo] Why stratification works");
+        println!(" 12. [Demo] Why stratification works");
         println!("  0. Exit");
         println!("\n  Tip: Use CLI with --csv for machine-readable output");
 
@@ -266,23 +286,29 @@ fn run_interactive() {
             "3" => agnostic::run(),
             "4" => survival::run(),
             "5" => multistate::run(),
-            "6" => {
+            "6" => deaths_only::run(),
+            "7" => {
                 if let Err(e) = analyze_binary::run() {
                     eprintln!("Error: {}", e);
                 }
             }
-            "7" => {
+            "8" => {
                 if let Err(e) = analyze_continuous::run() {
                     eprintln!("Error: {}", e);
                 }
             }
-            "8" => {
+            "9" => {
                 if let Err(e) = analyze_survival::run() {
                     eprintln!("Error: {}", e);
                 }
             }
-            "9" => run_analyze_multistate_interactive(),
-            "10" => multistate_experiment::run(),
+            "10" => run_analyze_multistate_interactive(),
+            "11" => {
+                if let Err(e) = analyze_deaths::run() {
+                    eprintln!("Error: {}", e);
+                }
+            }
+            "12" => multistate_experiment::run(),
             "0" => {
                 println!("Goodbye!");
                 break;

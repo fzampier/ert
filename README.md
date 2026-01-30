@@ -26,6 +26,7 @@ The preprint has R code from a previous implementation. This Rust implementation
 | e-RTc | Continuous | Biomarkers, lab values, any continuous outcome |
 | e-RTs | Time-to-event | Overall survival, PFS |
 | e-RTms | Multi-state | ICU trajectories (Dead/ICU/Ward/Home) |
+| e-RTd | Deaths-only | Mortality monitoring without survivor tracking |
 | e-RTu | Universal | Domain-agnostic (good/bad signals) |
 
 e-RTms uses stratified averaging across transition types to handle non-absorbing states where patients can bounce between levels.
